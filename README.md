@@ -113,10 +113,10 @@ uv pip install -r requirements.txt
 - JSON storage for headers and attachments
 
 ### **Sentence Embeddings**
-- Uses `all-MiniLM-L6-v2` model
-- 384-dimensional embeddings
-- Semantic similarity search
-- Fast inference (~10-50ms per email)
+- Uses `e5-base` model (intfloat/e5-base)
+- 768-dimensional embeddings
+- High-quality semantic similarity search
+- Excellent performance for semantic search
 
 ### **Semantic Search**
 - Find emails by meaning, not just keywords
@@ -190,7 +190,7 @@ print(f"Processed {stats['saved']} emails")
 
 ### **Memory Usage**
 - Core parser: ~50-100MB
-- With embeddings: ~2GB recommended
+- With embeddings: ~2.5GB recommended
 - Database: Depends on email volume
 
 ## 🛠️ **Configuration Options**

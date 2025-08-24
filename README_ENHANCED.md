@@ -176,10 +176,10 @@ for folder, count in stats['folders'].items():
 ## 🧠 **Embedding Model**
 
 ### **Model Details**
-- **Model**: `all-MiniLM-L6-v2`
-- **Dimensions**: 384
-- **Performance**: Fast inference, good quality
-- **Memory**: ~90MB
+- **Model**: `e5-base` (intfloat/e5-base)
+- **Dimensions**: 768
+- **Performance**: High quality embeddings, excellent for semantic search
+- **Memory**: ~200MB
 
 ### **Text Processing for Embeddings**
 ```python
@@ -204,9 +204,9 @@ similarity = np.dot(query_embedding, email_embedding) / (
 - **Connection Pooling**: Single connection per session
 
 ### **Embedding Performance**
-- **Model Loading**: ~2-5 seconds first time
-- **Inference**: ~10-50ms per email (depending on text length)
-- **Memory**: ~2GB RAM recommended for large datasets
+- **Model Loading**: ~3-8 seconds first time
+- **Inference**: ~15-80ms per email (depending on text length)
+- **Memory**: ~2.5GB RAM recommended for large datasets
 
 ### **Processing Speed**
 - **Small Maildir** (<1000 emails): ~1-5 minutes
@@ -244,7 +244,9 @@ similarity = np.dot(query_embedding, email_embedding) / (
 from sentence_transformers import SentenceTransformer
 
 # Use different model
-custom_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+custom_model = SentenceTransformer('intfloat/e5-large-v2')  # Larger, higher quality
+# Or use multilingual model
+# custom_model = SentenceTransformer('intfloat/multilingual-e5-base')
 parser = EnhancedMaildirParser(
     '/path/to/maildir',
     embedding_model=custom_model,

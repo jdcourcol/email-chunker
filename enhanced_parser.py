@@ -8,6 +8,7 @@ and sentence embeddings using sentence-transformers.
 
 from main import MaildirParser, html_to_plain_text
 from database_manager import DatabaseManager
+from config import Config
 import numpy as np
 from typing import List, Dict, Any, Optional
 
@@ -15,21 +16,33 @@ from typing import List, Dict, Any, Optional
 class EnhancedMaildirParser(MaildirParser):
     """Enhanced MaildirParser with database integration and embeddings."""
     
-    def __init__(self, maildir_path: str, convert_html: bool = True, aggressive_clean: bool = False, 
+    def __init__(self, maildir_path: Optional[str] = None, convert_html: bool = True, aggressive_clean: bool = False, 
                  db_manager: Optional[DatabaseManager] = None, embedding_model=None):
         """
         Initialize the EnhancedMaildirParser.
         
         Args:
-            maildir_path: Path to the Maildir folder (root directory containing subdirectories)
+            maildir_path: Optional path to the Maildir folder (only needed for processing emails)
             convert_html: Whether to convert HTML content to plain text (default: True)
             aggressive_clean: Whether to use aggressive CSS/HTML cleaning (default: False)
             db_manager: Optional database manager for saving emails
             embedding_model: Optional sentence transformer model for embeddings
         """
-        super().__init__(maildir_path, convert_html, aggressive_clean)
+        # Only initialize MaildirParser if maildir_path is provided
+        if maildir_path:
+            super().__init__(maildir_path, convert_html, aggressive_clean)
+        else:
+            # For search-only operations, we don't need to initialize the parent class
+            self.maildir_path = None
+            self.convert_html = convert_html
+            self.aggressive_clean = aggressive_clean
+        
         self.db_manager = db_manager
         self.embedding_model = embedding_model
+    
+    def is_search_only(self) -> bool:
+        """Check if this parser is in search-only mode (no Maildir access)."""
+        return self.maildir_path is None
     
     def save_emails_to_database(self, emails: List[Dict[str, Any]], 
                                compute_embeddings: bool = True) -> Dict[str, int]:
@@ -82,7 +95,7 @@ class EnhancedMaildirParser(MaildirParser):
                             embedding = self.embedding_model.encode(text_for_embedding).tolist()
                             
                             # Save embedding to database
-                            if self.db_manager.save_embedding(email_id, embedding, 'all-MiniLM-L6-v2'):
+                            if self.db_manager.save_embedding(email_id, embedding, 'e5-base'):
                                 embedding_count += 1
                                 print(f"  Saved embedding for email ID {email_id}")
                             else:
@@ -194,6 +207,49 @@ class EnhancedMaildirParser(MaildirParser):
             print(f"Error in semantic search: {e}")
             return []
     
+    def search_emails_hybrid(self, query: str, search_type: str = 'both', 
+                           search_fields: List[str] = None, limit: int = 100,
+                           folder: str = None, case_sensitive: bool = False, show_sql: bool = False) -> Dict[str, Any]:
+        """
+        Hybrid search combining SQL LIKE and semantic search.
+        
+        Args:
+            query: Search query text
+            search_type: 'sql', 'semantic', or 'both'
+            search_fields: Fields for SQL search (default: ['subject', 'body', 'sender'])
+            limit: Maximum results per search type
+            folder: Optional folder to limit search to
+            case_sensitive: Whether to perform case-sensitive SQL search (default: False)
+            show_sql: Whether to display the SQL query being executed
+            
+        Returns:
+            Dictionary with search results and metadata
+        """
+        if not self.db_manager:
+            print("Database manager not configured")
+            return {}
+        
+        try:
+            # Use database manager's hybrid search
+            results = self.db_manager.search_emails_hybrid(
+                query, search_type, search_fields, limit, folder, 0.1, case_sensitive, show_sql
+            )
+            
+            # If semantic search is requested but no embeddings available, fall back to SQL
+            if search_type in ['semantic', 'both'] and results['search_metadata'].get('semantic_count', 0) == 0:
+                print("No embeddings available, falling back to SQL search")
+                if search_type == 'semantic':
+                    search_type = 'sql'
+                results = self.db_manager.search_emails_hybrid(
+                    query, search_type, search_fields, limit, folder, 0.1, False, False
+                )
+            
+            return results
+            
+        except Exception as e:
+            print(f"Error in hybrid search: {e}")
+            return {}
+    
     def get_database_stats(self) -> Dict[str, Any]:
         """
         Get statistics about the database.
@@ -235,8 +291,8 @@ def create_embedding_model():
     """
     try:
         from sentence_transformers import SentenceTransformer
-        print("Loading sentence transformer model 'all-MiniLM-L6-v2'...")
-        model = SentenceTransformer('all-MiniLM-L6-v2')
+        print("Loading sentence transformer model 'e5-base'...")
+        model = SentenceTransformer('intfloat/e5-base')
         print("Model loaded successfully!")
         return model
     except ImportError:
@@ -253,33 +309,62 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description='Enhanced Maildir Parser with Database Integration')
-    parser.add_argument('maildir_path', help='Path to the Maildir root folder')
+    parser.add_argument('maildir_path', nargs='?', help='Path to the Maildir root folder (optional for search)')
     
-    # Database options
-    parser.add_argument('--db-host', required=True, help='PostgreSQL database host')
-    parser.add_argument('--db-port', type=int, default=5432, help='PostgreSQL database port')
-    parser.add_argument('--db-name', required=True, help='PostgreSQL database name')
-    parser.add_argument('--db-user', required=True, help='PostgreSQL database user')
-    parser.add_argument('--db-password', required=True, help='PostgreSQL database password')
+    # Database options (optional if config file exists)
+    parser.add_argument('--db-host', help='PostgreSQL database host (overrides config)')
+    parser.add_argument('--db-port', type=int, help='PostgreSQL database port (overrides config)')
+    parser.add_argument('--db-name', help='PostgreSQL database name (overrides config)')
+    parser.add_argument('--db-user', help='PostgreSQL database user (overrides config)')
+    parser.add_argument('--db-password', help='PostgreSQL database password (overrides config)')
     
     # Processing options
     parser.add_argument('--process-all', action='store_true', help='Process all folders to database')
     parser.add_argument('--folder', help='Process specific folder only')
     parser.add_argument('--no-embeddings', action='store_true', help='Skip computing embeddings')
-    parser.add_argument('--semantic-search', help='Perform semantic search with query')
+    
+    # Search options
+    parser.add_argument('--search', help='Search query')
+    parser.add_argument('--search-type', choices=['sql', 'semantic', 'both'], default='both',
+                       help='Search type: sql (LIKE), semantic (embeddings), or both (default: both)')
+    parser.add_argument('--search-fields', nargs='+', 
+                       default=['subject', 'body', 'sender'],
+                       help='Fields to search in for SQL search (default: subject body sender)')
+    parser.add_argument('--case-sensitive', action='store_true',
+                       help='Perform case-sensitive SQL search (default: case-insensitive)')
+    parser.add_argument('--show-sql', action='store_true',
+                       help='Display the SQL query being executed')
+    parser.add_argument('--semantic-search', help='Perform semantic search with query (legacy option)')
     
     args = parser.parse_args()
     
     try:
-        # Initialize database manager
-        db_params = {
-            'host': args.db_host,
-            'port': args.db_port,
-            'database': args.db_name,
-            'user': args.db_user,
-            'password': args.db_password
-        }
+        # Load configuration
+        config = Config()
         
+        # Setup database connection (command line args override config)
+        db_params = config.get_db_config()
+        
+        # Override with command line arguments if provided
+        if args.db_host:
+            db_params['host'] = args.db_host
+        if args.db_port:
+            db_params['port'] = args.db_port
+        if args.db_name:
+            db_params['database'] = args.db_name
+        if args.db_user:
+            db_params['user'] = args.db_user
+        if args.db_password:
+            db_params['password'] = args.db_password
+        
+        # Check if we have complete database configuration
+        if not all(db_params.get(key) for key in ['host', 'database', 'user', 'password']):
+            print("Error: Incomplete database configuration")
+            print("Please run: python config.py setup")
+            print("Or provide all database parameters via command line")
+            return 1
+        
+        # Initialize database manager
         db_manager = DatabaseManager(db_params)
         if not db_manager.create_tables():
             print("Failed to create database tables")
@@ -295,8 +380,17 @@ def main():
                 print("Warning: Continuing without embeddings")
         
         # Initialize enhanced parser
+        # For search operations, we don't need the Maildir path
+        maildir_path = args.maildir_path if hasattr(args, 'maildir_path') and args.maildir_path else None
+        
+        # Check if Maildir path is required for the requested operation
+        if not maildir_path and any([args.process_all, args.folder]):
+            print("Error: Maildir path is required for processing operations")
+            print("Use: python enhanced_parser.py /path/to/maildir [options]")
+            return 1
+        
         enhanced_parser = EnhancedMaildirParser(
-            args.maildir_path,
+            maildir_path,
             convert_html=True,
             aggressive_clean=True,
             db_manager=db_manager,
@@ -331,7 +425,64 @@ def main():
             
             return 0
         
-        # Semantic search if requested
+        # Search if requested
+        if args.search:
+            print(f"Performing {args.search_type} search for: '{args.search}'")
+            
+            # Use hybrid search
+            results = enhanced_parser.search_emails_hybrid(
+                query=args.search,
+                search_type=args.search_type,
+                search_fields=args.search_fields,
+                limit=20,
+                folder=args.folder,
+                case_sensitive=args.case_sensitive,
+                show_sql=args.show_sql
+            )
+            
+            if not results:
+                print("No search results found")
+                return 0
+            
+            # Display search metadata
+            metadata = results['search_metadata']
+            print(f"\nSearch Results:")
+            print(f"  Search Type: {metadata['search_type']}")
+            print(f"  Folder: {metadata.get('folder', 'All folders')}")
+            print(f"  SQL Results: {metadata.get('sql_count', 0)}")
+            print(f"  Semantic Results: {metadata.get('semantic_count', 0)}")
+            print(f"  Total Results: {metadata['total_results']}")
+            
+            # Display results
+            if args.search_type == 'both' and results['combined_results']:
+                emails_to_show = results['combined_results']
+            elif args.search_type == 'sql' and results['sql_results']:
+                emails_to_show = results['sql_results']
+            elif args.search_type == 'semantic' and results['semantic_results']:
+                emails_to_show = results['semantic_results']
+            else:
+                emails_to_show = []
+            
+            if emails_to_show:
+                print(f"\nTop {len(emails_to_show)} results:")
+                for i, email in enumerate(emails_to_show, 1):
+                    search_type = email.get('search_type', 'unknown')
+                    similarity = email.get('similarity_score', 0)
+                    
+                    print(f"{i}. {email.get('subject', 'No subject')}")
+                    print(f"   From: {email.get('sender', 'Unknown')}")
+                    print(f"   Folder: {email.get('folder', 'Unknown')}")
+                    print(f"   Date: {email.get('date_sent', 'Unknown')}")
+                    if search_type == 'semantic' and similarity > 0:
+                        print(f"   Similarity: {similarity:.3f}")
+                    print(f"   Search Type: {search_type}")
+                    print()
+            else:
+                print("No results found")
+            
+            return 0
+        
+        # Legacy semantic search if requested
         if args.semantic_search:
             if not embedding_model:
                 print("Error: Embedding model required for semantic search")
@@ -354,9 +505,14 @@ def main():
         print("Enhanced Maildir Parser with Database Integration")
         print("=" * 60)
         print("Available options:")
-        print("  --process-all: Process all folders to database")
-        print("  --folder FOLDER: Process specific folder only")
-        print("  --semantic-search QUERY: Search emails semantically")
+        print("  --process-all: Process all folders to database (requires Maildir path)")
+        print("  --folder FOLDER: Process specific folder only (requires Maildir path)")
+        print("  --search QUERY: Search emails (SQL + semantic) - NO Maildir path needed!")
+        print("  --search-type TYPE: Choose search type (sql/semantic/both)")
+        print("  --search-fields FIELDS: Specify SQL search fields")
+        print("  --case-sensitive: Perform case-sensitive SQL search")
+        print("  --show-sql: Display the SQL query being executed")
+        print("  --semantic-search QUERY: Legacy semantic search")
         print("  --no-embeddings: Skip computing embeddings")
         
         # Show database stats

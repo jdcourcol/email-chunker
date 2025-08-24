@@ -172,6 +172,15 @@ cython_debug/
 *.sqlite
 *.sqlite3
 
+# Configuration files (contain sensitive data)
+config.json
+config.local.json
+.env
+.env.local
+
+# Keep example config for reference
+!config.example.json
+
 # Email data (for privacy/security)
 *.eml
 *.msg

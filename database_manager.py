@@ -230,7 +230,7 @@ class DatabaseManager:
                            eae.embedding_model
                     FROM emails e
                     JOIN email_embeddings eae ON e.id = eae.email_id
-                    WHERE eae.embedding_model = 'all-MiniLM-L6-v2'
+                    WHERE eae.embedding_model = 'e5-base'
                     LIMIT %s
                 """, (limit,))
                 
@@ -268,3 +268,184 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting emails by folder: {e}")
             return []
+    
+    def search_emails_sql_like(self, search_term: str, search_fields: List[str] = None, 
+                              limit: int = 100, folder: str = None, case_sensitive: bool = False,
+                              show_sql: bool = False) -> List[Dict[str, Any]]:
+        """
+        Search emails using SQL LIKE for traditional text-based search.
+        
+        Args:
+            search_term: Text to search for
+            search_fields: List of fields to search in (default: ['subject', 'body', 'sender'])
+            limit: Maximum number of results to return
+            folder: Optional folder to limit search to
+            case_sensitive: Whether to perform case-sensitive search (default: False = case-insensitive)
+            show_sql: Whether to display the SQL query being executed
+            
+        Returns:
+            List of emails matching the search criteria
+        """
+        if not self.connection:
+            return []
+        
+        if search_fields is None:
+            search_fields = ['subject', 'body', 'sender']
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                # Build dynamic WHERE clause based on search fields
+                where_conditions = []
+                params = []
+                
+                # Choose between LIKE (case-sensitive) and ILIKE (case-insensitive)
+                like_operator = "LIKE" if case_sensitive else "ILIKE"
+                
+                for field in search_fields:
+                    if field in ['subject', 'body', 'sender', 'recipient']:
+                        where_conditions.append(f"{field} {like_operator} %s")
+                        params.append(f"%{search_term}%")
+                
+                # Add folder filter if specified (case-insensitive for folder names)
+                if folder:
+                    where_conditions.append("folder ILIKE %s")
+                    params.append(folder)
+                
+                # Build the complete query
+                where_clause = " OR ".join(where_conditions) if where_conditions else "1=1"
+                
+                query = f"""
+                    SELECT * FROM emails 
+                    WHERE {where_clause}
+                    ORDER BY date_sent DESC 
+                    LIMIT %s
+                """
+                
+                params.append(limit)
+                
+                # Display SQL query if requested
+                if show_sql:
+                    print("\n🔍 SQL Query:")
+                    print("=" * 50)
+                    print(query)
+                    print("Parameters:", params)
+                    print("=" * 50)
+                
+                cursor.execute(query, params)
+                return cursor.fetchall()
+                
+        except Exception as e:
+            print(f"Error searching emails with SQL LIKE: {e}")
+            return []
+    
+    def search_emails_hybrid(self, search_term: str, search_type: str = 'both',
+                            search_fields: List[str] = None, limit: int = 100,
+                            folder: str = None, similarity_threshold: float = 0.1,
+                            case_sensitive: bool = False, show_sql: bool = False) -> Dict[str, Any]:
+        """
+        Hybrid search combining SQL LIKE and semantic search.
+        
+        Args:
+            search_term: Text to search for
+            search_type: 'sql', 'semantic', or 'both'
+            search_fields: Fields for SQL search (default: ['subject', 'body', 'sender'])
+            limit: Maximum results per search type
+            folder: Optional folder to limit search to
+            similarity_threshold: Minimum similarity for semantic search
+            case_sensitive: Whether to perform case-sensitive SQL search (default: False)
+            show_sql: Whether to display the SQL query being executed
+            
+        Returns:
+            Dictionary with search results and metadata
+        """
+        results = {
+            'sql_results': [],
+            'semantic_results': [],
+            'combined_results': [],
+            'search_metadata': {
+                'search_term': search_term,
+                'search_type': search_type,
+                'folder': folder,
+                'total_results': 0
+            }
+        }
+        
+        # SQL LIKE search
+        if search_type in ['sql', 'both']:
+            sql_results = self.search_emails_sql_like(
+                search_term, search_fields, limit, folder, case_sensitive, show_sql
+            )
+            results['sql_results'] = sql_results
+            results['search_metadata']['sql_count'] = len(sql_results)
+        
+        # Semantic search (if embeddings exist)
+        if search_type in ['semantic', 'both']:
+            # Check if we have embeddings
+            embedding_count = self.get_embedding_count()
+            if embedding_count > 0:
+                semantic_results = self.search_emails_semantic(search_term, limit)
+                results['semantic_results'] = semantic_results
+                results['search_metadata']['semantic_count'] = len(semantic_results)
+            else:
+                results['search_metadata']['semantic_count'] = 0
+                results['search_metadata']['semantic_note'] = 'No embeddings available'
+        
+        # Combine results if both search types requested
+        if search_type == 'both':
+            combined = []
+            seen_ids = set()
+            
+            # Calculate how many results to show from each type
+            # Show up to limit/2 from each type, but ensure we show both types
+            max_per_type = max(1, limit // 2)
+            
+            # Add semantic results first (up to max_per_type)
+            semantic_added = 0
+            for email in results['semantic_results']:
+                if email['id'] not in seen_ids and semantic_added < max_per_type:
+                    email_copy = dict(email)
+                    email_copy['search_type'] = 'semantic'
+                    combined.append(email_copy)
+                    seen_ids.add(email['id'])
+                    semantic_added += 1
+            
+            # Add SQL results (up to max_per_type, avoiding duplicates)
+            sql_added = 0
+            for email in results['sql_results']:
+                if email['id'] not in seen_ids and sql_added < max_per_type:
+                    email_copy = dict(email)
+                    email_copy['search_type'] = 'sql'
+                    combined.append(email_copy)
+                    seen_ids.add(email['id'])
+                    sql_added += 1
+            
+            # Sort combined results by relevance (semantic first, then by date)
+            combined.sort(key=lambda x: (
+                x.get('search_type') == 'semantic',  # Semantic results first
+                x.get('date_sent') or datetime.min     # Then by date
+            ), reverse=True)
+            
+            # Limit to requested limit
+            results['combined_results'] = combined[:limit]
+            results['search_metadata']['total_results'] = len(results['combined_results'])
+        else:
+            # Single search type
+            if search_type == 'sql':
+                results['search_metadata']['total_results'] = len(results['sql_results'])
+            else:
+                results['search_metadata']['total_results'] = len(results['semantic_results'])
+        
+        return results
+    
+    def get_embedding_count(self) -> int:
+        """Get total number of embeddings in database."""
+        if not self.connection:
+            return 0
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM email_embeddings")
+                return cursor.fetchone()[0]
+        except Exception as e:
+            print(f"Error getting embedding count: {e}")
+            return 0
