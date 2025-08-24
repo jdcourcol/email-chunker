@@ -12,6 +12,7 @@ from sentence_transformers import SentenceTransformer
 from config import Config
 import numpy as np
 from datetime import datetime
+from reranker import EmailReranker
 
 
 class DatabaseSearcher:
@@ -20,16 +21,19 @@ class DatabaseSearcher:
     No Maildir access required.
     """
     
-    def __init__(self, db_manager: DatabaseManager, embedding_model: Optional[SentenceTransformer] = None):
+    def __init__(self, db_manager: DatabaseManager, embedding_model: Optional[SentenceTransformer] = None, 
+                 reranker: Optional[EmailReranker] = None):
         """
         Initialize the database searcher.
         
         Args:
             db_manager: Database manager instance
             embedding_model: Optional embedding model for semantic search
+            reranker: Optional cross-encoder reranker for improving result relevance
         """
         self.db_manager = db_manager
         self.embedding_model = embedding_model
+        self.reranker = reranker
     
     def search_emails_sql(self, search_term: str, search_fields: List[str] = None,
                          limit: int = 100, folder: str = None) -> List[Dict[str, Any]]:
@@ -74,6 +78,12 @@ class DatabaseSearcher:
             # Add search_type to each result
             for result in results:
                 result['search_type'] = 'semantic'
+            
+            # Apply cross-encoder reranking if available
+            if self.reranker:
+                print(f"🔄 Applying cross-encoder reranking...")
+                results = self.reranker.rerank_results(query, results, top_k=limit)
+                print(f"✅ Reranking complete!")
             
             return results
             
@@ -132,6 +142,13 @@ class DatabaseSearcher:
             
             # Update the results with fresh semantic results that have similarity scores
             results['semantic_results'] = fresh_semantic_results
+            
+            # Apply cross-encoder reranking to semantic results if available
+            if self.reranker:
+                print(f"🔄 Applying cross-encoder reranking to semantic results...")
+                reranked_semantic = self.reranker.rerank_results(query, fresh_semantic_results, top_k=limit)
+                results['semantic_results'] = reranked_semantic
+                print(f"✅ Reranking complete!")
             
             # Update combined results if this is a hybrid search
             if search_type == 'both' and results.get('combined_results'):

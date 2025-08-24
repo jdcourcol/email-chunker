@@ -9,6 +9,7 @@ without needing access to the original Maildir folders.
 from database_searcher import DatabaseSearcher, create_embedding_model
 from database_manager import DatabaseManager
 from config import Config
+from reranker import create_reranker
 
 
 def main():
@@ -82,8 +83,11 @@ def main():
                 elif args.type == 'both':
                     args.type = 'sql'
         
+        # Load reranker for better result relevance
+        reranker = create_reranker()
+        
         # Create searcher
-        searcher = DatabaseSearcher(db_manager, embedding_model)
+        searcher = DatabaseSearcher(db_manager, embedding_model, reranker)
         
         # Perform search
         print(f"Searching for: '{args.query}'")
@@ -131,6 +135,9 @@ def main():
             
             if 'similarity_score' in email:
                 print(f"   Similarity: {email['similarity_score']:.3f}")
+            
+            if 'cross_encoder_score' in email:
+                print(f"   Cross-Encoder: {email['cross_encoder_score']:.3f}")
             
             search_type = email.get('search_type', 'unknown')
             print(f"   Found via: {search_type}")
