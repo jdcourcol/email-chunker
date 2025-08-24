@@ -10,6 +10,12 @@ A comprehensive Python library for reading, parsing, and analyzing emails from M
 - **Search & Analysis**: Search emails by subject, sender, or recipient
 - **Database Integration**: Optional PostgreSQL storage with sentence embeddings
 - **Semantic Search**: AI-powered email search using sentence transformers
+- **pgvector Integration**: High-performance vector similarity search
+- **Cross-Encoder Reranking**: Improved search relevance with MS-MARCO models
+- **Hybrid Search**: Combine semantic and SQL search methods
+- **Standalone Search**: Search database without Maildir access
+- **Configurable Depth**: Adjustable semantic search coverage
+- **Smart Prioritization**: Results ordered by search method relevance
 - **No External Dependencies**: Core functionality uses only Python standard library
 
 ## 📁 **Project Structure**
@@ -19,6 +25,11 @@ email-chunker/
 ├── main.py                 # Core MaildirParser class
 ├── enhanced_parser.py      # Database integration + embeddings
 ├── database_manager.py     # PostgreSQL operations
+├── database_searcher.py    # Standalone search interface
+├── search_emails.py        # Command-line search tool
+├── reranker.py             # Cross-encoder reranking
+├── recompute_embeddings.py # Embedding regeneration tool
+├── config.py               # Configuration management
 ├── example_usage.py        # Usage examples
 ├── requirements.txt        # Dependencies
 ├── README.md              # This file
@@ -59,6 +70,18 @@ python enhanced_parser.py /path/to/your/maildir \
     --db-user your_username \
     --db-password your_password \
     --semantic-search "project deadline"
+```
+
+### **Advanced Search (Standalone)**
+```bash
+# Search directly from database (no Maildir required)
+uv run search_emails.py --query "Azure migration" --type both --limit 10
+
+# Semantic search with custom depth
+uv run search_emails.py --query "project deadline" --type semantic --semantic-depth 200
+
+# SQL search with case sensitivity
+uv run search_emails.py --query "URGENT" --type sql --case-sensitive --show-sql
 ```
 
 ## 📚 **Installation**
@@ -107,22 +130,22 @@ uv pip install -r requirements.txt
 ## 🗄️ **Database Integration (Enhanced)**
 
 ### **PostgreSQL Storage**
-- Structured email storage
-- Automatic table creation
-- Efficient indexing
+- Structured email storage with automatic table creation
+- Efficient indexing for fast queries
 - JSON storage for headers and attachments
+- pgvector extension support for vector similarity search
 
 ### **Sentence Embeddings**
-- Uses `e5-base` model (intfloat/e5-base)
-- 768-dimensional embeddings
-- High-quality semantic similarity search
-- Excellent performance for semantic search
+- **Model**: `e5-base` (intfloat/e5-base) - 768 dimensions
+- **Quality**: High-performance semantic similarity search
+- **Storage**: Optimized for pgvector and fallback to REAL[]
+- **Coverage**: 100% email coverage with automatic embedding generation
 
-### **Semantic Search**
-- Find emails by meaning, not just keywords
-- Similarity scoring and ranking
-- Context-aware search results
-- Cross-folder semantic search
+### **Advanced Search Architecture**
+- **Bi-Encoder**: Fast pgvector similarity search for initial retrieval
+- **Cross-Encoder**: Reranking with `cross-encoder/ms-marco-MiniLM-L-6-v2`
+- **Hybrid Search**: Combines semantic and SQL search methods
+- **Smart Prioritization**: Results ordered by search method relevance
 
 ## 📖 **Usage Examples**
 
@@ -167,19 +190,77 @@ stats = parser.process_all_folders_to_database()
 print(f"Processed {stats['saved']} emails")
 ```
 
-## 🔍 **Search Capabilities**
+### **Advanced Search Usage**
+```python
+from database_searcher import DatabaseSearcher
+from reranker import create_reranker
+
+# Initialize searcher with reranker
+reranker = create_reranker()
+searcher = DatabaseSearcher(db_manager, embedding_model, reranker)
+
+# Hybrid search
+results = searcher.search_emails_hybrid(
+    query="Azure migration",
+    search_type="both",
+    limit=10
+)
+
+# Access results by type
+semantic_results = results['semantic_results']
+sql_results = results['sql_results']
+combined_results = results['combined_results']
+```
+
+## 🔍 **Advanced Search Capabilities**
+
+### **Standalone Search (No Maildir Required)**
+```bash
+# Search directly from database
+uv run search_emails.py --query "your search term" --type both --limit 10
+
+# Semantic search only
+uv run search_emails.py --query "your search term" --type semantic --limit 5
+
+# SQL search only
+uv run search_emails.py --query "your search term" --type sql --limit 5
+```
+
+### **Search Types**
+- **`--type semantic`**: AI-powered semantic search using pgvector
+- **`--type sql`**: Traditional text-based search using SQL LIKE/ILIKE
+- **`--type both`**: Hybrid search combining both methods
+
+### **Semantic Search Features**
+- **pgvector Integration**: Database-level vector similarity search
+- **Cross-Encoder Reranking**: `cross-encoder/ms-marco-MiniLM-L-6-v2` for improved relevance
+- **Configurable Depth**: `--semantic-depth` parameter (default: 100x limit)
+- **Similarity Scores**: Bi-encoder similarity + cross-encoder relevance scores
+
+### **Search Options**
+```bash
+--query "search term"           # Search query
+--type semantic|sql|both        # Search type
+--limit N                       # Maximum results
+--folder FOLDER                 # Limit to specific folder
+--fields subject body sender    # SQL search fields
+--case-sensitive                # Case-sensitive SQL search
+--show-sql                      # Display SQL queries
+--semantic-depth N              # Semantic search depth multiplier
+```
+
+### **Result Prioritization**
+Results are automatically ordered by relevance:
+1. **"Found via: both"** ⭐ (Highest - found by both semantic and SQL)
+2. **"Found via: semantic"** (High - semantic meaning matches)
+3. **"Found via: sql"** (Good - text pattern matches)
 
 ### **Traditional Search**
 - Subject, sender, recipient matching
 - Folder-based filtering
 - Date range queries
 - Exact and partial matching
-
-### **Semantic Search**
-- Concept-based search
-- Meaning understanding
-- Similarity scoring
-- Cross-language support
+- Case-sensitive/insensitive options
 
 ## 📊 **Performance**
 
@@ -188,10 +269,18 @@ print(f"Processed {stats['saved']} emails")
 - **Medium Maildir** (1000-10000 emails): ~5-30 minutes
 - **Large Maildir** (>10000 emails): ~30+ minutes
 
+### **Search Performance**
+- **pgvector Search**: Sub-second response for semantic queries
+- **Cross-Encoder Reranking**: ~100-500ms per result (depending on model)
+- **Hybrid Search**: Combines speed of pgvector with accuracy of reranking
+- **Configurable Depth**: Balance between coverage and speed
+
 ### **Memory Usage**
-- Core parser: ~50-100MB
-- With embeddings: ~2.5GB recommended
-- Database: Depends on email volume
+- **Core parser**: ~50-100MB
+- **With embeddings**: ~2.5GB recommended
+- **Cross-encoder reranker**: ~200MB additional
+- **Database**: Depends on email volume
+- **pgvector**: Efficient vector storage and indexing
 
 ## 🛠️ **Configuration Options**
 
@@ -216,6 +305,59 @@ print(f"Processed {stats['saved']} emails")
 --folder FOLDER        # Process specific folder
 --semantic-search QUERY # Semantic search
 --limit N              # Limit results
+```
+
+### **Search Options**
+```bash
+--query "search term"           # Search query
+--type semantic|sql|both        # Search type
+--limit N                       # Maximum results
+--folder FOLDER                 # Limit to specific folder
+--fields subject body sender    # SQL search fields
+--case-sensitive                # Case-sensitive SQL search
+--show-sql                      # Display SQL queries
+--semantic-depth N              # Semantic search depth multiplier
+```
+
+## 🛠️ **Tools & Utilities**
+
+### **Standalone Search Tool**
+```bash
+# Basic search
+uv run search_emails.py --query "your query" --type both
+
+# Advanced search with options
+uv run search_emails.py \
+    --query "Azure migration" \
+    --type both \
+    --limit 20 \
+    --semantic-depth 200 \
+    --show-sql \
+    --case-sensitive
+```
+
+### **Embedding Management**
+```bash
+# Recompute all embeddings
+uv run recompute_embeddings.py --batch-size 100
+
+# Check embedding status
+uv run recompute_embeddings.py --show-stats
+
+# Dry run (see what would be done)
+uv run recompute_embeddings.py --dry-run
+```
+
+### **Configuration Management**
+```bash
+# Setup configuration
+python config.py setup
+
+# View current config
+python config.py show
+
+# Test configuration
+python config.py test
 ```
 
 ## 🚨 **Troubleshooting**
