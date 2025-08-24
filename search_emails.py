@@ -37,6 +37,8 @@ def main():
                        help='Perform case-sensitive SQL search (default: case-insensitive)')
     parser.add_argument('--show-sql', action='store_true',
                        help='Display the SQL query being executed')
+    parser.add_argument('--semantic-depth', type=int, default=100,
+                       help='Semantic search depth multiplier (default: 100, max: 1000)')
     
     args = parser.parse_args()
     
@@ -88,6 +90,9 @@ def main():
         
         # Create searcher
         searcher = DatabaseSearcher(db_manager, embedding_model, reranker)
+        
+        # Set semantic search depth
+        searcher.semantic_depth_multiplier = min(args.semantic_depth, 1000)  # Cap at 1000
         
         # Perform search
         print(f"Searching for: '{args.query}'")

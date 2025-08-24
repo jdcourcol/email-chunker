@@ -34,6 +34,7 @@ class DatabaseSearcher:
         self.db_manager = db_manager
         self.embedding_model = embedding_model
         self.reranker = reranker
+        self.semantic_depth_multiplier = 100  # Default: 100x the requested limit
     
     def search_emails_sql(self, search_term: str, search_fields: List[str] = None,
                          limit: int = 100, folder: str = None) -> List[Dict[str, Any]]:
@@ -73,7 +74,9 @@ class DatabaseSearcher:
             query_embedding = self.embedding_model.encode(query).tolist()
             
             # Use pgvector search directly from database manager
-            results = self.db_manager.search_emails_semantic(query, limit, query_embedding)
+            # Use configurable semantic depth for better search coverage
+            semantic_search_limit = min(limit * self.semantic_depth_multiplier, 10000)
+            results = self.db_manager.search_emails_semantic(query, semantic_search_limit, query_embedding)
             
             # Add search_type to each result
             for result in results:
@@ -138,7 +141,9 @@ class DatabaseSearcher:
             query_embedding = self.embedding_model.encode(query).tolist()
             
             # Get fresh semantic results with similarity scores
-            fresh_semantic_results = self.db_manager.search_emails_semantic(query, limit, query_embedding)
+            # Use a higher limit for semantic search to get better reranking candidates
+            semantic_search_limit = min(limit * self.semantic_depth_multiplier, 10000)  # Configurable depth
+            fresh_semantic_results = self.db_manager.search_emails_semantic(query, semantic_search_limit, query_embedding)
             
             # Update the results with fresh semantic results that have similarity scores
             results['semantic_results'] = fresh_semantic_results
@@ -155,12 +160,26 @@ class DatabaseSearcher:
                 # Rebuild combined results with fresh semantic results
                 combined = []
                 seen_ids = set()
+                semantic_ids = set()
+                sql_ids = set()
+                
+                # Track semantic result IDs
+                for email in fresh_semantic_results:
+                    semantic_ids.add(email['id'])
+                
+                # Track SQL result IDs
+                for email in results.get('sql_results', []):
+                    sql_ids.add(email['id'])
                 
                 # Add fresh semantic results first (already sorted by cross-encoder)
                 for email in fresh_semantic_results:
                     if email['id'] not in seen_ids:
                         email_copy = dict(email)
-                        email_copy['search_type'] = 'semantic'
+                        # Check if this email was found by both methods
+                        if email['id'] in sql_ids:
+                            email_copy['search_type'] = 'both'
+                        else:
+                            email_copy['search_type'] = 'semantic'
                         combined.append(email_copy)
                         seen_ids.add(email['id'])
                 
@@ -168,20 +187,53 @@ class DatabaseSearcher:
                 for email in results.get('sql_results', []):
                     if email['id'] not in seen_ids:
                         email_copy = dict(email)
-                        email_copy['search_type'] = 'sql'
+                        # Check if this email was found by both methods
+                        if email['id'] in semantic_ids:
+                            email_copy['search_type'] = 'both'
+                        else:
+                            email_copy['search_type'] = 'sql'
                         combined.append(email_copy)
                         seen_ids.add(email['id'])
                 
-                # Sort combined results by relevance (semantic first, then by cross-encoder score, then by date)
+                # Sort combined results by relevance (both first, then semantic, then by cross-encoder score, then by date)
                 combined.sort(key=lambda x: (
-                    x.get('search_type') == 'semantic',  # Semantic results first
+                    x.get('search_type') == 'both',  # Both results first (highest priority)
+                    x.get('search_type') == 'semantic',  # Then semantic results
                     x.get('cross_encoder_score', 0) if x.get('search_type') == 'semantic' else 0,  # Then by cross-encoder score for semantic
                     x.get('date_sent') or datetime.min     # Then by date
                 ), reverse=True)
                 
-                # Limit to requested limit
-                results['combined_results'] = combined[:limit]
-                results['search_metadata']['total_results'] = len(results['combined_results'])
+                # Ensure we have a balanced mix of results
+                # Take up to limit/2 from each type, then fill remaining slots
+                balanced_results = []
+                semantic_count = 0
+                sql_count = 0
+                both_count = 0
+                
+                for email in combined:
+                    if len(balanced_results) >= limit:
+                        break
+                    
+                    search_type = email.get('search_type', 'unknown')
+                    if search_type == 'both':
+                        balanced_results.append(email)
+                        both_count += 1
+                    elif search_type == 'semantic' and semantic_count < limit // 2:
+                        balanced_results.append(email)
+                        semantic_count += 1
+                    elif search_type == 'sql' and sql_count < limit // 2:
+                        balanced_results.append(email)
+                        sql_count += 1
+                
+                # Fill remaining slots with best remaining results
+                for email in combined:
+                    if len(balanced_results) >= limit:
+                        break
+                    if email not in balanced_results:
+                        balanced_results.append(email)
+                
+                results['combined_results'] = balanced_results
+                results['search_metadata']['total_results'] = len(balanced_results)
                 results['search_metadata']['semantic_count'] = len(fresh_semantic_results)
         
         # Add search_type to semantic results if they exist
@@ -268,6 +320,24 @@ class DatabaseSearcher:
         except Exception as e:
             print(f"Error getting email by ID: {e}")
             return None
+    
+    def set_semantic_depth(self, multiplier: int):
+        """
+        Set the semantic search depth multiplier.
+        
+        Args:
+            multiplier: How many times the requested limit to search (1-1000)
+        """
+        self.semantic_depth_multiplier = max(1, min(multiplier, 1000))
+    
+    def get_semantic_depth(self) -> int:
+        """
+        Get the current semantic search depth multiplier.
+        
+        Returns:
+            Current depth multiplier
+        """
+        return self.semantic_depth_multiplier
 
 
 def create_embedding_model():
