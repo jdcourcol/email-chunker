@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 import re
 from typing import Dict, Any, Optional, List
+import numpy as np
 
 
 class DatabaseManager:
@@ -30,6 +31,21 @@ class DatabaseManager:
         """Establish database connection."""
         try:
             self.connection = psycopg2.connect(**self.connection_params)
+            
+            # Check if pgvector extension is available
+            if not hasattr(self, 'pgvector_available'):
+                try:
+                    with self.connection.cursor() as cursor:
+                        cursor.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+                        self.pgvector_available = cursor.fetchone() is not None
+                        if self.pgvector_available:
+                            print(f"✅ pgvector extension detected - using vector similarity search")
+                        else:
+                            print(f"⚠️  pgvector extension not found - using in-memory similarity search")
+                except Exception as e:
+                    print(f"⚠️  Could not check pgvector extension: {e}")
+                    self.pgvector_available = False
+            
             return True
         except Exception as e:
             print(f"Database connection failed: {e}")
@@ -67,16 +83,38 @@ class DatabaseManager:
                     )
                 """)
                 
-                # Create embeddings table
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS email_embeddings (
-                        id SERIAL PRIMARY KEY,
-                        email_id INTEGER REFERENCES emails(id) ON DELETE CASCADE,
-                        embedding_vector REAL[],
-                        embedding_model VARCHAR(100),
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
+                # Try to create pgvector extension first
+                self.pgvector_available = False
+                try:
+                    cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                    self.pgvector_available = True
+                    print("✅ pgvector extension enabled - using vector similarity search")
+                except Exception as e:
+                    print(f"⚠️  pgvector extension not available: {e}")
+                    print("   Falling back to in-memory similarity search")
+                    self.pgvector_available = False
+                
+                # Create embeddings table based on pgvector availability
+                if self.pgvector_available:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS email_embeddings (
+                            id SERIAL PRIMARY KEY,
+                            email_id INTEGER UNIQUE REFERENCES emails(id) ON DELETE CASCADE,
+                            embedding_vector vector(768),  -- e5-base has 768 dimensions
+                            embedding_model VARCHAR(100),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                else:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS email_embeddings (
+                            id SERIAL PRIMARY KEY,
+                            email_id INTEGER UNIQUE REFERENCES emails(id) ON DELETE CASCADE,
+                            embedding_vector REAL[],
+                            embedding_model VARCHAR(100),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
                 
                 # Create indexes for better performance
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id)")
@@ -85,7 +123,24 @@ class DatabaseManager:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_emails_sender ON emails(sender)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_emails_subject ON emails(subject)")
                 
+                # Create vector similarity index for fast semantic search (only if pgvector available)
+                if self.pgvector_available:
+                    try:
+                        cursor.execute("""
+                            CREATE INDEX IF NOT EXISTS idx_embeddings_vector 
+                            ON email_embeddings 
+                            USING ivfflat (embedding_vector vector_cosine_ops)
+                            WITH (lists = 100)
+                        """)
+                        print("✅ Vector similarity index created")
+                    except Exception as e:
+                        print(f"⚠️  Vector index creation failed: {e}")
+                
                 self.connection.commit()
+                
+                # Ensure constraints exist (for existing tables)
+                self.ensure_embedding_constraints()
+                
                 return True
                 
         except Exception as e:
@@ -181,10 +236,20 @@ class DatabaseManager:
         
         try:
             with self.connection.cursor() as cursor:
+                # Convert embedding to list for database storage
+                if isinstance(embedding, np.ndarray):
+                    embedding_list = embedding.tolist()
+                else:
+                    embedding_list = list(embedding)
+                
                 cursor.execute("""
                     INSERT INTO email_embeddings (email_id, embedding_vector, embedding_model)
                     VALUES (%s, %s, %s)
-                """, (email_id, embedding, model_name))
+                    ON CONFLICT (email_id) DO UPDATE SET
+                        embedding_vector = EXCLUDED.embedding_vector,
+                        embedding_model = EXCLUDED.embedding_model,
+                        created_at = CURRENT_TIMESTAMP
+                """, (email_id, embedding_list, model_name))
                 
                 self.connection.commit()
                 return True
@@ -208,13 +273,15 @@ class DatabaseManager:
             print(f"Error getting email count: {e}")
             return 0
     
-    def search_emails_semantic(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    def search_emails_semantic(self, query: str, limit: int = 10, 
+                              query_embedding: Optional[List[float]] = None) -> List[Dict[str, Any]]:
         """
-        Search emails using semantic similarity with embeddings.
+        Search emails using semantic similarity with pgvector or fallback to in-memory.
         
         Args:
             query: Search query text
             limit: Maximum number of results to return
+            query_embedding: Pre-computed query embedding (optional)
             
         Returns:
             List of emails with similarity scores
@@ -224,6 +291,46 @@ class DatabaseManager:
         
         try:
             with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                if query_embedding and hasattr(self, 'pgvector_available') and self.pgvector_available:
+                    # Use pgvector cosine similarity search
+                    print(f"DEBUG: Using pgvector search, pgvector_available={self.pgvector_available}")
+                    try:
+                        embedding_array = np.array(query_embedding, dtype=np.float32)
+                        embedding_list = embedding_array.tolist()  # Convert to list for psycopg2
+                        print(f"DEBUG: Query embedding shape: {embedding_array.shape}, dtype: {embedding_array.dtype}")
+                        
+                        cursor.execute("""
+                            SELECT e.*, 
+                                   eae.embedding_model,
+                                   1 - (eae.embedding_vector <=> %s::vector) as similarity_score
+                            FROM emails e
+                            JOIN email_embeddings eae ON e.id = eae.email_id
+                            WHERE eae.embedding_model = 'e5-base'
+                            ORDER BY eae.embedding_vector <=> %s::vector
+                            LIMIT %s
+                        """, (embedding_list, embedding_list, limit))
+                        
+                        results = cursor.fetchall()
+                        print(f"DEBUG: pgvector search returned {len(results)} results")
+                        
+                        # Convert similarity scores to float
+                        for result in results:
+                            if 'similarity_score' in result:
+                                result['similarity_score'] = float(result['similarity_score'])
+                        
+                        return results
+                        
+                    except Exception as pgvector_error:
+                        print(f"pgvector search failed, falling back to in-memory: {pgvector_error}")
+                        import traceback
+                        traceback.print_exc()
+                        # Fall through to in-memory search
+                else:
+                    print(f"DEBUG: pgvector not available, pgvector_available={getattr(self, 'pgvector_available', 'NOT_SET')}")
+                    print(f"DEBUG: hasattr pgvector_available={hasattr(self, 'pgvector_available')}")
+                    print(f"DEBUG: query_embedding provided={query_embedding is not None}")
+                
+                # Fallback to in-memory similarity search
                 cursor.execute("""
                     SELECT e.*, 
                            eae.embedding_vector,
@@ -232,9 +339,39 @@ class DatabaseManager:
                     JOIN email_embeddings eae ON e.id = eae.email_id
                     WHERE eae.embedding_model = 'e5-base'
                     LIMIT %s
-                """, (limit,))
+                """, (limit * 2,))  # Get more results for better in-memory selection
                 
-                return cursor.fetchall()
+                results = cursor.fetchall()
+                
+                if not results or not query_embedding:
+                    return results
+                
+                # Compute similarity scores in memory
+                query_embedding_array = np.array(query_embedding)
+                scored_results = []
+                
+                for email in results:
+                    if 'embedding_vector' in email and email['embedding_vector']:
+                        try:
+                            # Convert embedding to numpy array for similarity computation
+                            email_embedding = np.array(email['embedding_vector'])
+                            
+                            # Compute cosine similarity
+                            similarity = np.dot(email_embedding, query_embedding_array) / (
+                                np.linalg.norm(email_embedding) * np.linalg.norm(query_embedding_array)
+                            )
+                            
+                            # Add similarity score to email data
+                            email_copy = dict(email)
+                            email_copy['similarity_score'] = float(similarity)
+                            scored_results.append(email_copy)
+                        except Exception as e:
+                            print(f"Error computing similarity for email {email.get('id', 'unknown')}: {e}")
+                            continue
+                
+                # Sort by similarity score (descending) and return top results
+                scored_results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
+                return scored_results[:limit]
                 
         except Exception as e:
             print(f"Error searching emails semantically: {e}")
@@ -383,6 +520,8 @@ class DatabaseManager:
             # Check if we have embeddings
             embedding_count = self.get_embedding_count()
             if embedding_count > 0:
+                # Note: query_embedding will be computed by the caller
+                # For now, we'll use the basic search and let the caller handle embeddings
                 semantic_results = self.search_emails_semantic(search_term, limit)
                 results['semantic_results'] = semantic_results
                 results['search_metadata']['semantic_count'] = len(semantic_results)
@@ -453,6 +592,42 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting embedding count: {e}")
             return 0
+    
+    def ensure_embedding_constraints(self) -> bool:
+        """Ensure the email_embeddings table has the required constraints."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                # Check if unique constraint exists
+                cursor.execute("""
+                    SELECT constraint_name 
+                    FROM information_schema.table_constraints 
+                    WHERE table_name = 'email_embeddings' 
+                    AND constraint_type = 'UNIQUE' 
+                    AND constraint_name LIKE '%email_id%'
+                """)
+                
+                if not cursor.fetchone():
+                    print("Adding unique constraint to email_id column...")
+                    cursor.execute("""
+                        ALTER TABLE email_embeddings 
+                        ADD CONSTRAINT email_embeddings_email_id_unique 
+                        UNIQUE (email_id)
+                    """)
+                    self.connection.commit()
+                    print("✅ Unique constraint added successfully")
+                    return True
+                else:
+                    print("✅ Unique constraint already exists")
+                    return True
+                    
+        except Exception as e:
+            print(f"Error ensuring constraints: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return False
     
     def clear_all_embeddings(self) -> bool:
         """Clear all embeddings from the database."""

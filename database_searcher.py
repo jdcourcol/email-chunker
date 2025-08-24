@@ -67,33 +67,14 @@ class DatabaseSearcher:
             # Compute query embedding
             query_embedding = self.embedding_model.encode(query).tolist()
             
-            # Get emails with embeddings from database
-            emails_with_embeddings = self.db_manager.search_emails_semantic(query, limit * 2)
+            # Use pgvector search directly from database manager
+            results = self.db_manager.search_emails_semantic(query, limit, query_embedding)
             
-            if not emails_with_embeddings:
-                return []
+            # Add search_type to each result
+            for result in results:
+                result['search_type'] = 'semantic'
             
-            # Compute similarity scores
-            results = []
-            for email in emails_with_embeddings:
-                if 'embedding_vector' in email and email['embedding_vector']:
-                    # Convert embedding to numpy array for similarity computation
-                    email_embedding = np.array(email['embedding_vector'])
-                    query_embedding_array = np.array(query_embedding)
-                    
-                    # Compute cosine similarity
-                    similarity = np.dot(email_embedding, query_embedding_array) / (
-                        np.linalg.norm(email_embedding) * np.linalg.norm(query_embedding_array)
-                    )
-                    
-                    # Add similarity score to email data
-                    email_copy = dict(email)
-                    email_copy['similarity_score'] = float(similarity)
-                    results.append(email_copy)
-            
-            # Sort by similarity score (descending) and return top results
-            results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
-            return results[:limit]
+            return results
             
         except Exception as e:
             print(f"Error in semantic search: {e}")
@@ -117,9 +98,39 @@ class DatabaseSearcher:
         Returns:
             Dictionary with search results and metadata
         """
-        return self.db_manager.search_emails_hybrid(
+        # For pure semantic search, use our optimized method
+        if search_type == 'semantic' and self.embedding_model:
+            semantic_results = self.search_emails_semantic(query, limit)
+            return {
+                'semantic_results': semantic_results,
+                'sql_results': [],
+                'combined_results': semantic_results,
+                'search_metadata': {
+                    'search_term': query,
+                    'search_type': search_type,
+                    'folder': folder,
+                    'total_results': len(semantic_results),
+                    'semantic_count': len(semantic_results),
+                    'sql_count': 0
+                }
+            }
+        
+        # For other search types, use the database manager
+        results = self.db_manager.search_emails_hybrid(
             query, search_type, search_fields, limit, folder, 0.1, case_sensitive, show_sql
         )
+        
+        # Add search_type to semantic results if they exist
+        if results.get('semantic_results') and self.embedding_model:
+            for result in results['semantic_results']:
+                result['search_type'] = 'semantic'
+        
+        # Add search_type to SQL results if they exist
+        if results.get('sql_results'):
+            for result in results['sql_results']:
+                result['search_type'] = 'sql'
+        
+        return results
     
     def get_database_stats(self) -> Dict[str, Any]:
         """

@@ -158,7 +158,7 @@ class EnhancedMaildirParser(MaildirParser):
     
     def search_emails_semantic(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        Search emails using semantic similarity with embeddings.
+        Search emails using semantic similarity with pgvector.
         
         Args:
             query: Search query text
@@ -175,33 +175,10 @@ class EnhancedMaildirParser(MaildirParser):
             # Compute query embedding
             query_embedding = self.embedding_model.encode(query).tolist()
             
-            # Get emails with embeddings from database
-            emails_with_embeddings = self.db_manager.search_emails_semantic(query, limit * 2)
+            # Use pgvector search directly from database
+            results = self.db_manager.search_emails_semantic(query, limit, query_embedding)
             
-            if not emails_with_embeddings:
-                return []
-            
-            # Compute similarity scores
-            results = []
-            for email in emails_with_embeddings:
-                if 'embedding_vector' in email and email['embedding_vector']:
-                    # Convert embedding to numpy array for similarity computation
-                    email_embedding = np.array(email['embedding_vector'])
-                    query_embedding_array = np.array(query_embedding)
-                    
-                    # Compute cosine similarity
-                    similarity = np.dot(email_embedding, query_embedding_array) / (
-                        np.linalg.norm(email_embedding) * np.linalg.norm(query_embedding_array)
-                    )
-                    
-                    # Add similarity score to email data
-                    email_copy = dict(email)
-                    email_copy['similarity_score'] = float(similarity)
-                    results.append(email_copy)
-            
-            # Sort by similarity score (descending) and return top results
-            results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
-            return results[:limit]
+            return results
             
         except Exception as e:
             print(f"Error in semantic search: {e}")
@@ -230,21 +207,69 @@ class EnhancedMaildirParser(MaildirParser):
             return {}
         
         try:
-            # Use database manager's hybrid search
-            results = self.db_manager.search_emails_hybrid(
-                query, search_type, search_fields, limit, folder, 0.1, case_sensitive, show_sql
-            )
-            
-            # If semantic search is requested but no embeddings available, fall back to SQL
-            if search_type in ['semantic', 'both'] and results['search_metadata'].get('semantic_count', 0) == 0:
-                print("No embeddings available, falling back to SQL search")
+            # For semantic search, we need to compute the query embedding first
+            if search_type in ['semantic', 'both'] and self.embedding_model:
+                query_embedding = self.embedding_model.encode(query).tolist()
+                
+                # Update the database manager's semantic search with the query embedding
                 if search_type == 'semantic':
-                    search_type = 'sql'
+                    # Pure semantic search
+                    semantic_results = self.db_manager.search_emails_semantic(query, limit, query_embedding)
+                    
+                    # Add search_type to each result
+                    for result in semantic_results:
+                        result['search_type'] = 'semantic'
+                    
+                    results = {
+                        'semantic_results': semantic_results,
+                        'sql_results': [],
+                        'combined_results': [],
+                        'search_metadata': {
+                            'search_term': query,
+                            'search_type': search_type,
+                            'folder': folder,
+                            'total_results': 0,
+                            'semantic_count': 0
+                        }
+                    }
+                    results['search_metadata']['semantic_count'] = len(results['semantic_results'])
+                    results['search_metadata']['total_results'] = len(results['semantic_results'])
+                    results['combined_results'] = results['semantic_results']
+                    return results
+                else:
+                    # Hybrid search - use database manager but with pgvector for semantic
+                    results = self.db_manager.search_emails_hybrid(
+                        query, search_type, search_fields, limit, folder, 0.1, case_sensitive, show_sql
+                    )
+                    
+                    # Update semantic results with pgvector search
+                    if results['search_metadata'].get('semantic_count', 0) > 0:
+                        semantic_results = self.db_manager.search_emails_semantic(query, limit, query_embedding)
+                        
+                        # Add search_type to each semantic result
+                        for result in semantic_results:
+                            result['search_type'] = 'semantic'
+                        
+                        results['semantic_results'] = semantic_results
+                        results['search_metadata']['semantic_count'] = len(semantic_results)
+                    
+                    return results
+            else:
+                # Use database manager's hybrid search for SQL-only or when no embedding model
                 results = self.db_manager.search_emails_hybrid(
-                    query, search_type, search_fields, limit, folder, 0.1, False, False
+                    query, search_type, search_fields, limit, folder, 0.1, case_sensitive, show_sql
                 )
-            
-            return results
+                
+                # If semantic search is requested but no embeddings available, fall back to SQL
+                if search_type in ['semantic', 'both'] and results['search_metadata'].get('semantic_count', 0) == 0:
+                    print("No embeddings available, falling back to SQL search")
+                    if search_type == 'semantic':
+                        search_type = 'sql'
+                    results = self.db_manager.search_emails_hybrid(
+                        query, search_type, search_fields, limit, folder, 0.1, False, False
+                    )
+                
+                return results
             
         except Exception as e:
             print(f"Error in hybrid search: {e}")
