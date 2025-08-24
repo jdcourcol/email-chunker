@@ -428,6 +428,10 @@ class DatabaseManager:
             # Limit to requested limit
             results['combined_results'] = combined[:limit]
             results['search_metadata']['total_results'] = len(results['combined_results'])
+            
+            # Update counts to show what was actually added to combined results
+            results['search_metadata']['sql_count'] = sql_added
+            results['search_metadata']['semantic_count'] = semantic_added
         else:
             # Single search type
             if search_type == 'sql':
@@ -449,3 +453,142 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting embedding count: {e}")
             return 0
+    
+    def clear_all_embeddings(self) -> bool:
+        """Clear all embeddings from the database."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("DELETE FROM email_embeddings")
+                self.connection.commit()
+                print(f"Cleared all embeddings from database")
+                return True
+        except Exception as e:
+            print(f"Error clearing embeddings: {e}")
+            return False
+    
+    def get_emails_without_embeddings(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Get emails that don't have embeddings yet."""
+        if not self.connection:
+            return []
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT e.* FROM emails e
+                    LEFT JOIN email_embeddings eae ON e.id = eae.email_id
+                    WHERE eae.email_id IS NULL
+                    ORDER BY e.date_sent DESC
+                    LIMIT %s
+                """, (limit,))
+                return cursor.fetchall()
+        except Exception as e:
+            print(f"Error getting emails without embeddings: {e}")
+            return []
+    
+    def recompute_embeddings(self, embedding_model, model_name: str = 'e5-base', 
+                            batch_size: int = 100, show_progress: bool = True) -> Dict[str, int]:
+        """
+        Recompute embeddings for all emails in the database.
+        
+        Args:
+            embedding_model: SentenceTransformer model instance
+            model_name: Name of the embedding model
+            batch_size: Number of emails to process in each batch
+            show_progress: Whether to show progress updates
+            
+        Returns:
+            Dictionary with recomputation statistics
+        """
+        if not self.connection:
+            return {'processed': 0, 'embeddings_created': 0, 'errors': 0}
+        
+        try:
+            # Clear existing embeddings
+            if show_progress:
+                print("Clearing existing embeddings...")
+            self.clear_all_embeddings()
+            
+            # Get all emails
+            with self.connection.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) FROM emails")
+                result = cursor.fetchone()
+                if result is None:
+                    print("Error: COUNT query returned no results")
+                    return {'processed': 0, 'embeddings_created': 0, 'errors': 0}
+                total_emails = result[0]
+            
+            if total_emails == 0:
+                print("No emails found in database")
+                return {'processed': 0, 'embeddings_created': 0, 'errors': 0}
+            
+            if show_progress:
+                print(f"Found {total_emails} emails to process")
+            
+            processed = 0
+            embeddings_created = 0
+            errors = 0
+            
+            # Process emails in batches
+            offset = 0
+            while offset < total_emails:
+                with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                    cursor.execute("""
+                        SELECT * FROM emails 
+                        ORDER BY date_sent DESC 
+                        LIMIT %s OFFSET %s
+                    """, (batch_size, offset))
+                    
+                    batch = cursor.fetchall()
+                    if not batch:
+                        break
+                    
+                    for email in batch:
+                        try:
+                            # Create text for embedding (subject + body)
+                            text_for_embedding = f"{email.get('subject', '')} {email.get('body', '')}"
+                            text_for_embedding = text_for_embedding.strip()
+                            
+                            if text_for_embedding:
+                                # Compute embedding
+                                embedding = embedding_model.encode(text_for_embedding).tolist()
+                                
+                                # Save embedding to database
+                                if self.save_embedding(email['id'], embedding, model_name):
+                                    embeddings_created += 1
+                                else:
+                                    errors += 1
+                            else:
+                                errors += 1
+                                
+                        except Exception as e:
+                            if show_progress:
+                                print(f"Error processing email {email.get('id', 'unknown')}: {e}")
+                            errors += 1
+                        
+                        processed += 1
+                        
+                        if show_progress and processed % 10 == 0:
+                            print(f"Processed {processed}/{total_emails} emails...")
+                
+                offset += batch_size
+            
+            if show_progress:
+                print(f"\nRecomputation complete!")
+                print(f"  Processed: {processed}")
+                print(f"  Embeddings created: {embeddings_created}")
+                print(f"  Errors: {errors}")
+            
+            return {
+                'processed': processed,
+                'embeddings_created': embeddings_created,
+                'errors': errors
+            }
+            
+        except Exception as e:
+            print(f"Error during recomputation: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'processed': 0, 'embeddings_created': 0, 'errors': 0}

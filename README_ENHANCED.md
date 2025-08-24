@@ -5,7 +5,7 @@ A powerful Python library for reading, parsing, and storing emails from Maildir 
 ## 🚀 **New Features**
 
 - **PostgreSQL Database Storage**: Store all parsed emails in a structured database
-- **Sentence Embeddings**: Generate embeddings using `all-MiniLM-L6-v2` model
+- **Sentence Embeddings**: Generate embeddings using `e5-base` model
 - **Semantic Search**: Find emails by meaning, not just keywords
 - **Multi-folder Support**: Handle INBOX, Drafts, Sent, and other folders
 - **HTML to Plain Text**: Clean conversion with aggressive CSS cleaning

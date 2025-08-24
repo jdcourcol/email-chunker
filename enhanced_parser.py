@@ -280,6 +280,65 @@ class EnhancedMaildirParser(MaildirParser):
         except Exception as e:
             print(f"Error getting database stats: {e}")
             return {'database_connected': False, 'error': str(e)}
+    
+    def recompute_all_embeddings(self, batch_size: int = 100, show_progress: bool = True) -> Dict[str, int]:
+        """
+        Recompute embeddings for all emails in the database.
+        
+        Args:
+            batch_size: Number of emails to process in each batch
+            show_progress: Whether to show progress updates
+            
+        Returns:
+            Dictionary with recomputation statistics
+        """
+        if not self.db_manager or not self.embedding_model:
+            print("Database manager or embedding model not configured")
+            return {'processed': 0, 'embeddings_created': 0, 'errors': 0}
+        
+        try:
+            print("Starting embedding recomputation...")
+            print(f"Model: {self.embedding_model.get_sentence_embedding_dimension()} dimensions")
+            
+            stats = self.db_manager.recompute_embeddings(
+                self.embedding_model,
+                model_name='e5-base',
+                batch_size=batch_size,
+                show_progress=show_progress
+            )
+            
+            return stats
+            
+        except Exception as e:
+            print(f"Error during embedding recomputation: {e}")
+            return {'processed': 0, 'embeddings_created': 0, 'errors': 0}
+    
+    def get_embedding_stats(self) -> Dict[str, Any]:
+        """
+        Get detailed statistics about embeddings in the database.
+        
+        Returns:
+            Dictionary with embedding statistics
+        """
+        if not self.db_manager:
+            return {}
+        
+        try:
+            total_emails = self.db_manager.get_email_count()
+            total_embeddings = self.db_manager.get_embedding_count()
+            emails_without_embeddings = self.db_manager.get_emails_without_embeddings(limit=1000)
+            
+            return {
+                'total_emails': total_emails,
+                'total_embeddings': total_embeddings,
+                'emails_without_embeddings': len(emails_without_embeddings),
+                'coverage_percentage': (total_embeddings / total_emails * 100) if total_emails > 0 else 0,
+                'embedding_model': 'e5-base'
+            }
+            
+        except Exception as e:
+            print(f"Error getting embedding stats: {e}")
+            return {}
 
 
 def create_embedding_model():
@@ -322,6 +381,8 @@ def main():
     parser.add_argument('--process-all', action='store_true', help='Process all folders to database')
     parser.add_argument('--folder', help='Process specific folder only')
     parser.add_argument('--no-embeddings', action='store_true', help='Skip computing embeddings')
+    parser.add_argument('--recompute-embeddings', action='store_true', help='Recompute all embeddings in database')
+    parser.add_argument('--batch-size', type=int, default=100, help='Batch size for embedding recomputation')
     
     # Search options
     parser.add_argument('--search', help='Search query')
@@ -425,6 +486,43 @@ def main():
             
             return 0
         
+        # Recompute embeddings if requested
+        if args.recompute_embeddings:
+            if not embedding_model:
+                print("Error: Embedding model required for recomputation")
+                return 1
+            
+            print("Starting embedding recomputation...")
+            print(f"Batch size: {args.batch_size}")
+            
+            # Show current embedding stats
+            embedding_stats = enhanced_parser.get_embedding_stats()
+            print(f"\nCurrent embedding status:")
+            print(f"  Total emails: {embedding_stats.get('total_emails', 0)}")
+            print(f"  Total embeddings: {embedding_stats.get('total_embeddings', 0)}")
+            print(f"  Coverage: {embedding_stats.get('coverage_percentage', 0):.1f}%")
+            print()
+            
+            # Perform recomputation
+            stats = enhanced_parser.recompute_all_embeddings(
+                batch_size=args.batch_size,
+                show_progress=True
+            )
+            
+            print(f"\nRecomputation complete:")
+            print(f"  Processed: {stats['processed']}")
+            print(f"  Embeddings created: {stats['embeddings_created']}")
+            print(f"  Errors: {stats['errors']}")
+            
+            # Show updated stats
+            updated_stats = enhanced_parser.get_embedding_stats()
+            print(f"\nUpdated embedding status:")
+            print(f"  Total emails: {updated_stats.get('total_emails', 0)}")
+            print(f"  Total embeddings: {updated_stats.get('total_embeddings', 0)}")
+            print(f"  Coverage: {updated_stats.get('coverage_percentage', 0):.1f}%")
+            
+            return 0
+        
         # Search if requested
         if args.search:
             print(f"Performing {args.search_type} search for: '{args.search}'")
@@ -507,6 +605,8 @@ def main():
         print("Available options:")
         print("  --process-all: Process all folders to database (requires Maildir path)")
         print("  --folder FOLDER: Process specific folder only (requires Maildir path)")
+        print("  --recompute-embeddings: Recompute all embeddings in database")
+        print("  --batch-size N: Batch size for embedding recomputation (default: 100)")
         print("  --search QUERY: Search emails (SQL + semantic) - NO Maildir path needed!")
         print("  --search-type TYPE: Choose search type (sql/semantic/both)")
         print("  --search-fields FIELDS: Specify SQL search fields")

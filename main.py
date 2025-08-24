@@ -709,7 +709,7 @@ class MaildirParser:
                             embedding = self.embedding_model.encode(text_for_embedding).tolist()
                             
                             # Save embedding to database
-                            if self.db_manager.save_embedding(email_id, embedding, 'all-MiniLM-L6-v2'):
+                            if self.db_manager.save_embedding(email_id, embedding, 'e5-base'):
                                 embedding_count += 1
                                 print(f"  Saved embedding for email ID {email_id}")
                             else:
@@ -847,7 +847,7 @@ def main():
             try:
                 print("Loading sentence transformer model...")
                 from sentence_transformers import SentenceTransformer
-                embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                embedding_model = SentenceTransformer('intfloat/e5-base')
                 print("Sentence transformer model loaded successfully")
             except ImportError:
                 print("Warning: sentence-transformers not available. Install with: pip install sentence-transformers")
