@@ -522,6 +522,7 @@ class DatabaseManager:
             if embedding_count > 0:
                 # Note: query_embedding will be computed by the caller
                 # For now, we'll use the basic search and let the caller handle embeddings
+                # The caller should pass query_embedding for pgvector search
                 semantic_results = self.search_emails_semantic(search_term, limit)
                 results['semantic_results'] = semantic_results
                 results['search_metadata']['semantic_count'] = len(semantic_results)

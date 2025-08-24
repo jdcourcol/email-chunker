@@ -11,6 +11,7 @@ from database_manager import DatabaseManager
 from sentence_transformers import SentenceTransformer
 from config import Config
 import numpy as np
+from datetime import datetime
 
 
 class DatabaseSearcher:
@@ -119,6 +120,51 @@ class DatabaseSearcher:
         results = self.db_manager.search_emails_hybrid(
             query, search_type, search_fields, limit, folder, 0.1, case_sensitive, show_sql
         )
+        
+        # If semantic search is requested and we have an embedding model,
+        # recompute semantic results with proper embeddings to get similarity scores
+        if search_type in ['semantic', 'both'] and self.embedding_model and results.get('semantic_results'):
+            # Compute query embedding
+            query_embedding = self.embedding_model.encode(query).tolist()
+            
+            # Get fresh semantic results with similarity scores
+            fresh_semantic_results = self.db_manager.search_emails_semantic(query, limit, query_embedding)
+            
+            # Update the results with fresh semantic results that have similarity scores
+            results['semantic_results'] = fresh_semantic_results
+            
+            # Update combined results if this is a hybrid search
+            if search_type == 'both' and results.get('combined_results'):
+                # Rebuild combined results with fresh semantic results
+                combined = []
+                seen_ids = set()
+                
+                # Add fresh semantic results first
+                for email in fresh_semantic_results:
+                    if email['id'] not in seen_ids:
+                        email_copy = dict(email)
+                        email_copy['search_type'] = 'semantic'
+                        combined.append(email_copy)
+                        seen_ids.add(email['id'])
+                
+                # Add SQL results (avoiding duplicates)
+                for email in results.get('sql_results', []):
+                    if email['id'] not in seen_ids:
+                        email_copy = dict(email)
+                        email_copy['search_type'] = 'sql'
+                        combined.append(email_copy)
+                        seen_ids.add(email['id'])
+                
+                # Sort combined results by relevance (semantic first, then by date)
+                combined.sort(key=lambda x: (
+                    x.get('search_type') == 'semantic',  # Semantic results first
+                    x.get('date_sent') or datetime.min     # Then by date
+                ), reverse=True)
+                
+                # Limit to requested limit
+                results['combined_results'] = combined[:limit]
+                results['search_metadata']['total_results'] = len(results['combined_results'])
+                results['search_metadata']['semantic_count'] = len(fresh_semantic_results)
         
         # Add search_type to semantic results if they exist
         if results.get('semantic_results') and self.embedding_model:
