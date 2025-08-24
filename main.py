@@ -21,6 +21,33 @@ from datetime import datetime
 import numpy as np
 
 
+def clean_text(text: str) -> str:
+    """
+    Clean text by removing unwanted characters, pilcrows, and normalizing whitespace.
+    
+    Args:
+        text: Text string to clean
+        
+    Returns:
+        Cleaned text string
+    """
+    if not text:
+        return text
+    
+    # Remove pilcrows and other unwanted characters
+    text = re.sub(r'¶', ' ', text)  # Remove pilcrow symbols
+    text = re.sub(r'[^\w\s\-.,!?;:()#$%&*+=<>[\]{}|\\/~`"\'_–—…]', '', text)
+    
+    # Remove excessive whitespace and normalize
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    
+    # Remove leading/trailing whitespace
+    text = text.strip()
+    
+    return text
+
+
 def html_to_plain_text(html_content: str) -> str:
     """
     Convert HTML content to plain text.
@@ -83,6 +110,9 @@ def html_to_plain_text(html_content: str) -> str:
     
     # Remove leading/trailing whitespace
     text = text.strip()
+    
+    # Apply general text cleaning to remove pilcrows and normalize
+    text = clean_text(text)
     
     return text
 
@@ -453,9 +483,9 @@ class MaildirParser:
         
         try:
             # Parse headers
-            parsed_email['subject'] = message.get('subject', '')
-            parsed_email['from'] = message.get('from', '')
-            parsed_email['to'] = message.get('to', '')
+            parsed_email['subject'] = clean_text(message.get('subject', ''))
+            parsed_email['from'] = clean_text(message.get('from', ''))
+            parsed_email['to'] = clean_text(message.get('to', ''))
             parsed_email['date'] = message.get('date', '')
             parsed_email['message_id'] = message.get('message-id', '')
             
@@ -473,9 +503,10 @@ class MaildirParser:
                     content_type = part.get_content_type()
                     if content_type == 'text/plain':
                         try:
-                            parsed_email['body'] = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                            body_content = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                            parsed_email['body'] = clean_text(body_content)
                         except:
-                            parsed_email['body'] = str(part.get_payload())
+                            parsed_email['body'] = clean_text(str(part.get_payload()))
                     elif content_type == 'text/html':
                         if not parsed_email['body']:  # Prefer plain text over HTML
                             try:
@@ -536,9 +567,9 @@ class MaildirParser:
                             parsed_email['body'] = html_to_plain_text(content)
                             parsed_email['content_type'] = 'text/plain (converted from HTML)'
                     else:
-                        parsed_email['body'] = content
+                        parsed_email['body'] = clean_text(content)
                 except:
-                    parsed_email['body'] = str(message.get_payload())
+                    parsed_email['body'] = clean_text(str(message.get_payload()))
             
             return parsed_email
             

@@ -109,7 +109,15 @@ class EmailReranker:
                 body = body[:1000] + "..."
             parts.append(f"Content: {body}")
         
-        return " | ".join(parts)
+        # Clean the final text to remove any remaining pilcrows or unwanted characters
+        final_text = " | ".join(parts)
+        
+        # Remove pilcrows and other unwanted characters
+        import re
+        final_text = re.sub(r'¶', '', final_text)  # Remove pilcrow symbols
+        final_text = re.sub(r'[^\w\s\-.,!?;:()@#$%&*+=<>[\]{}|\\/~`"\'_–—…]', '', final_text)
+        
+        return final_text
     
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the loaded model."""

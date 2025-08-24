@@ -156,7 +156,7 @@ class DatabaseSearcher:
                 combined = []
                 seen_ids = set()
                 
-                # Add fresh semantic results first
+                # Add fresh semantic results first (already sorted by cross-encoder)
                 for email in fresh_semantic_results:
                     if email['id'] not in seen_ids:
                         email_copy = dict(email)
@@ -172,9 +172,10 @@ class DatabaseSearcher:
                         combined.append(email_copy)
                         seen_ids.add(email['id'])
                 
-                # Sort combined results by relevance (semantic first, then by date)
+                # Sort combined results by relevance (semantic first, then by cross-encoder score, then by date)
                 combined.sort(key=lambda x: (
                     x.get('search_type') == 'semantic',  # Semantic results first
+                    x.get('cross_encoder_score', 0) if x.get('search_type') == 'semantic' else 0,  # Then by cross-encoder score for semantic
                     x.get('date_sent') or datetime.min     # Then by date
                 ), reverse=True)
                 
