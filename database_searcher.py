@@ -94,6 +94,51 @@ class DatabaseSearcher:
             print(f"Error in semantic search: {e}")
             return []
     
+    def search_pdf_documents(self, query: str, limit: int = 10, folder_name: str = None) -> List[Dict[str, Any]]:
+        """
+        Search PDF documents using semantic similarity.
+        
+        Args:
+            query: Search query text
+            limit: Maximum number of results
+            folder_name: Optional folder to limit search to
+            
+        Returns:
+            List of matching PDF documents with similarity scores
+        """
+        if not self.embedding_model:
+            print("Warning: No embedding model available for PDF semantic search")
+            return []
+        
+        try:
+            # Compute query embedding
+            query_embedding = self.embedding_model.encode(query).tolist()
+            
+            # Search PDF documents
+            results = self.db_manager.search_pdf_documents(
+                query=query,
+                query_embedding=query_embedding,
+                limit=limit,
+                folder_name=folder_name
+            )
+            
+            # Add search_type to each result
+            for result in results:
+                result['search_type'] = 'semantic'
+                result['document_type'] = 'pdf'
+            
+            # Apply cross-encoder reranking if available
+            if self.reranker:
+                print(f"🔄 Applying cross-encoder reranking to PDF results...")
+                results = self.reranker.rerank_results(query, results, top_k=limit)
+                print(f"✅ PDF reranking complete!")
+            
+            return results
+            
+        except Exception as e:
+            print(f"Error in PDF semantic search: {e}")
+            return []
+    
     def search_emails_hybrid(self, query: str, search_type: str = 'both',
                             search_fields: List[str] = None, limit: int = 100,
                             folder: str = None, case_sensitive: bool = False, show_sql: bool = False) -> Dict[str, Any]:

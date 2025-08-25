@@ -123,6 +123,70 @@ class DatabaseManager:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_emails_sender ON emails(sender)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_emails_subject ON emails(subject)")
                 
+                # Create PDF documents table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS pdf_documents (
+                        id SERIAL PRIMARY KEY,
+                        file_path VARCHAR(1000) UNIQUE,
+                        file_name VARCHAR(500),
+                        folder_name VARCHAR(100),
+                        content TEXT,
+                        content_length INTEGER,
+                        page_count INTEGER,
+                        file_size BIGINT,
+                        title VARCHAR(500),
+                        author VARCHAR(500),
+                        subject VARCHAR(500),
+                        creator VARCHAR(200),
+                        producer VARCHAR(200),
+                        created_date TIMESTAMP,
+                        modified_date TIMESTAMP,
+                        metadata JSONB,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Create PDF embeddings table
+                if self.pgvector_available:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS pdf_embeddings (
+                            id SERIAL PRIMARY KEY,
+                            pdf_id INTEGER UNIQUE REFERENCES pdf_documents(id) ON DELETE CASCADE,
+                            embedding_vector vector(768),
+                            embedding_model VARCHAR(100),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                else:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS pdf_embeddings (
+                            id SERIAL PRIMARY KEY,
+                            pdf_id INTEGER UNIQUE REFERENCES pdf_documents(id) ON DELETE CASCADE,
+                            embedding_vector REAL[],
+                            embedding_model VARCHAR(100),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                
+                # Create PDF indexes
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdf_documents_file_path ON pdf_documents(file_path)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdf_documents_folder_name ON pdf_documents(folder_name)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdf_documents_file_name ON pdf_documents(file_name)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdf_documents_content_length ON pdf_documents(content_length)")
+                
+                # Create vector similarity index for PDFs (only if pgvector available)
+                if self.pgvector_available:
+                    try:
+                        cursor.execute("""
+                            CREATE INDEX IF NOT EXISTS idx_pdf_embeddings_vector 
+                            ON pdf_embeddings 
+                            USING ivfflat (embedding_vector vector_cosine_ops)
+                            WITH (lists = 100)
+                        """)
+                        print("✅ PDF vector similarity index created")
+                    except Exception as e:
+                        print(f"⚠️  PDF vector index creation failed: {e}")
+                
                 # Create vector similarity index for fast semantic search (only if pgvector available)
                 if self.pgvector_available:
                     try:
@@ -768,3 +832,264 @@ class DatabaseManager:
             import traceback
             traceback.print_exc()
             return {'processed': 0, 'embeddings_created': 0, 'errors': 0}
+    
+    # ==================== PDF Document Methods ====================
+    
+    def pdf_document_exists(self, file_path: str) -> bool:
+        """Check if a PDF document already exists in the database."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("SELECT 1 FROM pdf_documents WHERE file_path = %s", (file_path,))
+                return cursor.fetchone() is not None
+        except Exception as e:
+            print(f"Error checking PDF document existence: {e}")
+            return False
+    
+    def save_pdf_document(self, file_path: str, file_name: str, folder_name: str, 
+                         content: str, metadata: Dict[str, Any], embedding: List[float]) -> bool:
+        """
+        Save PDF document data to database.
+        
+        Args:
+            file_path: Full path to the PDF file
+            file_name: Name of the PDF file
+            folder_name: Folder/category name
+            content: Extracted text content
+            metadata: PDF metadata dictionary
+            embedding: Document embedding vector
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.connection:
+            if not self.connect():
+                return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                # Insert PDF document
+                cursor.execute("""
+                    INSERT INTO pdf_documents (
+                        file_path, file_name, folder_name, content, content_length,
+                        page_count, file_size, title, author, subject, creator, producer,
+                        created_date, modified_date, metadata
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (file_path) DO UPDATE SET
+                        file_name = EXCLUDED.file_name,
+                        folder_name = EXCLUDED.folder_name,
+                        content = EXCLUDED.content,
+                        content_length = EXCLUDED.content_length,
+                        page_count = EXCLUDED.page_count,
+                        file_size = EXCLUDED.file_size,
+                        title = EXCLUDED.title,
+                        author = EXCLUDED.author,
+                        subject = EXCLUDED.subject,
+                        creator = EXCLUDED.creator,
+                        producer = EXCLUDED.producer,
+                        created_date = EXCLUDED.created_date,
+                        modified_date = EXCLUDED.modified_date,
+                        metadata = EXCLUDED.metadata,
+                        created_at = CURRENT_TIMESTAMP
+                    RETURNING id
+                """, (
+                    file_path, file_name, folder_name, content, metadata.get('content_length', 0),
+                    metadata.get('page_count', 0), metadata.get('file_size', 0),
+                    metadata.get('title', ''), metadata.get('author', ''),
+                    metadata.get('subject', ''), metadata.get('creator', ''),
+                    metadata.get('producer', ''), metadata.get('created_date'),
+                    metadata.get('modified_date'), json.dumps(metadata)
+                ))
+                
+                result = cursor.fetchone()
+                if result:
+                    pdf_id = result[0]
+                    
+                    # Save embedding
+                    if self.save_pdf_embedding(pdf_id, embedding, 'e5-base'):
+                        self.connection.commit()
+                        return True
+                    else:
+                        self.connection.rollback()
+                        return False
+                else:
+                    self.connection.rollback()
+                    return False
+                    
+        except Exception as e:
+            print(f"Error saving PDF document: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return False
+    
+    def save_pdf_embedding(self, pdf_id: int, embedding: List[float], model_name: str = 'e5-base') -> bool:
+        """
+        Save PDF document embedding to database.
+        
+        Args:
+            pdf_id: Database ID of the PDF document
+            embedding: Embedding vector
+            model_name: Name of the embedding model
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                if self.pgvector_available:
+                    cursor.execute("""
+                        INSERT INTO pdf_embeddings (pdf_id, embedding_vector, embedding_model)
+                        VALUES (%s, %s::vector, %s)
+                        ON CONFLICT (pdf_id) DO UPDATE SET
+                            embedding_vector = EXCLUDED.embedding_vector,
+                            embedding_model = EXCLUDED.embedding_model,
+                            created_at = CURRENT_TIMESTAMP
+                    """, (pdf_id, embedding, model_name))
+                else:
+                    cursor.execute("""
+                        INSERT INTO pdf_embeddings (pdf_id, embedding_vector, embedding_model)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (pdf_id) DO UPDATE SET
+                            embedding_vector = EXCLUDED.embedding_vector,
+                            embedding_model = EXCLUDED.embedding_model,
+                            created_at = CURRENT_TIMESTAMP
+                    """, (pdf_id, embedding, model_name))
+                
+                return True
+                
+        except Exception as e:
+            print(f"Error saving PDF embedding: {e}")
+            return False
+    
+    def search_pdf_documents(self, query: str, query_embedding: List[float], 
+                           limit: int = 10, folder_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Search PDF documents using semantic similarity.
+        
+        Args:
+            query: Search query text
+            query_embedding: Query embedding vector
+            limit: Maximum number of results
+            folder_name: Optional folder filter
+            
+        Returns:
+            List of matching PDF documents with similarity scores
+        """
+        if not self.connection:
+            return []
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                if self.pgvector_available:
+                    # Use pgvector for fast similarity search
+                    if folder_name:
+                        cursor.execute("""
+                            SELECT pd.*, pe.embedding_model,
+                                   1 - (pe.embedding_vector <=> %s::vector) as similarity_score
+                            FROM pdf_documents pd
+                            JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
+                            WHERE pd.folder_name = %s
+                            ORDER BY pe.embedding_vector <=> %s::vector
+                            LIMIT %s
+                        """, (query_embedding, folder_name, query_embedding, limit))
+                    else:
+                        cursor.execute("""
+                            SELECT pd.*, pe.embedding_model,
+                                   1 - (pe.embedding_vector <=> %s::vector) as similarity_score
+                            FROM pdf_documents pd
+                            JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
+                            ORDER BY pe.embedding_vector <=> %s::vector
+                            LIMIT %s
+                        """, (query_embedding, query_embedding, limit))
+                    
+                    # Return pgvector results directly
+                    results = cursor.fetchall()
+                    print(f"🔍 pgvector search returned {len(results)} results")
+                    return results
+                else:
+                    # Fallback to in-memory similarity search
+                    if folder_name:
+                        cursor.execute("""
+                            SELECT pd.*, pe.embedding_model, pe.embedding_vector
+                            FROM pdf_documents pd
+                            JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
+                            WHERE pd.folder_name = %s
+                            LIMIT %s
+                        """, (folder_name, limit * 10))  # Get more candidates for in-memory search
+                    else:
+                        cursor.execute("""
+                            SELECT pd.*, pe.embedding_model, pe.embedding_vector
+                            FROM pdf_documents pd
+                            JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
+                            LIMIT %s
+                        """, (limit * 10))
+                    
+                    # Compute similarity scores in memory
+                    results = cursor.fetchall()
+                    for result in results:
+                        if result['embedding_vector']:
+                            try:
+                                # Convert to numpy array for similarity calculation
+                                embedding_array = np.array(result['embedding_vector'])
+                                query_array = np.array(query_embedding)
+                                
+                                # Compute cosine similarity
+                                similarity = np.dot(embedding_array, query_array) / (
+                                    np.linalg.norm(embedding_array) * np.linalg.norm(query_array)
+                                )
+                                result['similarity_score'] = float(similarity)
+                            except Exception as e:
+                                result['similarity_score'] = 0.0
+                        else:
+                            result['similarity_score'] = 0.0
+                    
+                    # Sort by similarity score and limit results
+                    results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
+                    results = results[:limit]
+                    return results
+                
+                # Return pgvector results directly
+                return cursor.fetchall()
+                
+        except Exception as e:
+            print(f"Error searching PDF documents: {e}")
+            return []
+    
+    def get_pdf_documents_without_embeddings(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Get PDF documents that don't have embeddings yet."""
+        if not self.connection:
+            return []
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT pd.* FROM pdf_documents pd
+                    LEFT JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
+                    WHERE pe.pdf_id IS NULL
+                    ORDER BY pd.created_at DESC
+                    LIMIT %s
+                """, (limit,))
+                return cursor.fetchall()
+        except Exception as e:
+            print(f"Error getting PDF documents without embeddings: {e}")
+            return []
+    
+    def clear_all_pdf_embeddings(self) -> bool:
+        """Clear all PDF embeddings from the database."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("DELETE FROM pdf_embeddings")
+                self.connection.commit()
+                print(f"Cleared all PDF embeddings from database")
+                return True
+        except Exception as e:
+            print(f"Error clearing PDF embeddings: {e}")
+            return False

@@ -48,6 +48,35 @@ def clean_text(text: str) -> str:
     return text
 
 
+def clean_message_id(message_id: str) -> str:
+    """
+    Clean message ID by removing pilcrows and normalizing whitespace while preserving valid email ID format.
+    
+    Args:
+        message_id: Message ID string to clean
+        
+    Returns:
+        Cleaned message ID string
+    """
+    if not message_id:
+        return message_id
+    
+    # Remove pilcrows and other unwanted characters that shouldn't be in message IDs
+    text = re.sub(r'¶', ' ', message_id)  # Remove pilcrow symbols
+    
+    # Only remove characters that are definitely not valid in message IDs
+    # Preserve angle brackets <>, @ symbol, and alphanumeric characters
+    text = re.sub(r'[^\w\s\-.,!?;:()#$%&*+=<>[\]{}|\\/~`"\'_–—…@]', '', text)
+    
+    # Remove excessive whitespace and normalize (but preserve single spaces)
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Remove leading/trailing whitespace
+    text = text.strip()
+    
+    return text
+
+
 def html_to_plain_text(html_content: str) -> str:
     """
     Convert HTML content to plain text.
@@ -487,7 +516,7 @@ class MaildirParser:
             parsed_email['from'] = clean_text(message.get('from', ''))
             parsed_email['to'] = clean_text(message.get('to', ''))
             parsed_email['date'] = message.get('date', '')
-            parsed_email['message_id'] = message.get('message-id', '')
+            parsed_email['message_id'] = clean_message_id(message.get('message-id', ''))
             
             # Get all headers
             for header_name in message.keys():
