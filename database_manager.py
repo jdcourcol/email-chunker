@@ -967,7 +967,7 @@ class DatabaseManager:
             return False
     
     def search_pdf_documents(self, query: str, query_embedding: List[float], 
-                           limit: int = 10, folder_name: Optional[str] = None) -> List[Dict[str, Any]]:
+                           limit: int = 10) -> List[Dict[str, Any]]:
         """
         Search PDF documents using semantic similarity.
         
@@ -975,7 +975,6 @@ class DatabaseManager:
             query: Search query text
             query_embedding: Query embedding vector
             limit: Maximum number of results
-            folder_name: Optional folder filter
             
         Returns:
             List of matching PDF documents with similarity scores
@@ -985,79 +984,77 @@ class DatabaseManager:
         
         try:
             with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
-                if self.pgvector_available:
-                    # Use pgvector for fast similarity search
-                    if folder_name:
-                        cursor.execute("""
-                            SELECT pd.*, pe.embedding_model,
-                                   1 - (pe.embedding_vector <=> %s::vector) as similarity_score
-                            FROM pdf_documents pd
-                            JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
-                            WHERE pd.folder_name = %s
-                            ORDER BY pe.embedding_vector <=> %s::vector
-                            LIMIT %s
-                        """, (query_embedding, folder_name, query_embedding, limit))
-                    else:
-                        cursor.execute("""
-                            SELECT pd.*, pe.embedding_model,
-                                   1 - (pe.embedding_vector <=> %s::vector) as similarity_score
-                            FROM pdf_documents pd
-                            JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
-                            ORDER BY pe.embedding_vector <=> %s::vector
-                            LIMIT %s
-                        """, (query_embedding, query_embedding, limit))
-                    
-                    # Return pgvector results directly
-                    results = cursor.fetchall()
-                    print(f"🔍 pgvector search returned {len(results)} results")
-                    return results
+                # First check if we have any PDF documents with embeddings
+                cursor.execute("""
+                    SELECT COUNT(*) FROM pdf_documents pd
+                    JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
+                    WHERE pe.embedding_vector IS NOT NULL
+                """)
+                result = cursor.fetchone()
+                print(f"🔍 Debug: cursor result type: {type(result)}, value: {result}")
+                
+                if result is None:
+                    print("🔍 No PDF documents with embeddings found in database")
+                    return []
+                
+                # Handle different result types
+                if isinstance(result, dict):
+                    total_count = result.get('count', 0)
+                elif isinstance(result, (tuple, list)):
+                    total_count = result[0] if result else 0
                 else:
-                    # Fallback to in-memory similarity search
-                    if folder_name:
-                        cursor.execute("""
-                            SELECT pd.*, pe.embedding_model, pe.embedding_vector
-                            FROM pdf_documents pd
-                            JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
-                            WHERE pd.folder_name = %s
-                            LIMIT %s
-                        """, (folder_name, limit * 10))  # Get more candidates for in-memory search
-                    else:
-                        cursor.execute("""
-                            SELECT pd.*, pe.embedding_model, pe.embedding_vector
-                            FROM pdf_documents pd
-                            JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
-                            LIMIT %s
-                        """, (limit * 10))
-                    
-                    # Compute similarity scores in memory
-                    results = cursor.fetchall()
-                    for result in results:
-                        if result['embedding_vector']:
-                            try:
-                                # Convert to numpy array for similarity calculation
-                                embedding_array = np.array(result['embedding_vector'])
-                                query_array = np.array(query_embedding)
-                                
-                                # Compute cosine similarity
-                                similarity = np.dot(embedding_array, query_array) / (
-                                    np.linalg.norm(embedding_array) * np.linalg.norm(query_array)
-                                )
-                                result['similarity_score'] = float(similarity)
-                            except Exception as e:
-                                result['similarity_score'] = 0.0
-                        else:
-                            result['similarity_score'] = 0.0
-                    
-                    # Sort by similarity score and limit results
-                    results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
-                    results = results[:limit]
-                    return results
+                    total_count = int(result) if result else 0
+                
+                if total_count == 0:
+                    print("🔍 No PDF documents with embeddings found in database")
+                    return []
+                
+                print(f"🔍 Found {total_count} PDF documents with embeddings")
+                
+
+                
+                embedding_array = np.array(query_embedding, dtype=np.float32)
+                embedding_list = embedding_array.tolist()  # Convert to list for psycopg2
+                
+                # Use pgvector for fast similarity search
+                cursor.execute("""
+                    SELECT pd.id, pd.file_path, pd.file_name, pd.folder_name, pd.content, 
+                           pd.content_length, pd.page_count, pd.file_size, pd.title, pd.author,
+                           pd.subject, pd.creator, pd.producer, pd.created_date, pd.modified_date,
+                           pd.metadata, pd.created_at as doc_created_at,
+                           pe.embedding_model, pe.embedding_vector,
+                           1 - (pe.embedding_vector <=> %s::vector) as similarity_score
+                    FROM pdf_documents pd
+                    JOIN pdf_embeddings pe ON pd.id = pe.pdf_id
+                    WHERE pe.embedding_vector IS NOT NULL
+                    ORDER BY 1 - (pe.embedding_vector <=> %s::vector) DESC
+                    LIMIT %s
+                """, (embedding_list, embedding_list, limit))
                 
                 # Return pgvector results directly
-                return cursor.fetchall()
+                results = cursor.fetchall()
+                print(f"🔍 pgvector search for pdf documents returned {len(results)} results")
+                
+                # Convert string vectors back to proper vectors if needed
+                for result in results:
+                    if isinstance(result['embedding_vector'], str):
+                        # The vector was returned as a string, convert it back
+                        try:
+                            # Parse the string representation back to a list
+                            import ast
+                            vector_str = result['embedding_vector'].strip()
+                            if vector_str.startswith('[') and vector_str.endswith(']'):
+                                vector_list = ast.literal_eval(vector_str)
+                                result['embedding_vector'] = vector_list
+                        except Exception as e:
+                            print(f"Warning: Could not parse vector string: {e}")
+                
+                return results
                 
         except Exception as e:
             print(f"Error searching PDF documents: {e}")
+            import traceback
+            traceback.print_exc()
             return []
     
     def get_pdf_documents_without_embeddings(self, limit: int = 1000) -> List[Dict[str, Any]]:
@@ -1092,4 +1089,475 @@ class DatabaseManager:
                 return True
         except Exception as e:
             print(f"Error clearing PDF embeddings: {e}")
+            return False
+
+    # Admin methods for service administrators
+    def get_all_emails(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Get all emails from the database (admin function)."""
+        if not self.connection:
+            return []
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT * FROM emails 
+                    ORDER BY date_sent DESC 
+                    LIMIT %s
+                """, (limit,))
+                return cursor.fetchall()
+        except Exception as e:
+            print(f"Error getting all emails: {e}")
+            return []
+
+    def get_email_by_id(self, email_id: int) -> Optional[Dict[str, Any]]:
+        """Get email by ID (admin function)."""
+        if not self.connection:
+            return None
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("SELECT * FROM emails WHERE id = %s", (email_id,))
+                return cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting email by ID: {e}")
+            return None
+
+    def update_email(self, email_id: int, update_data: Dict[str, Any]) -> bool:
+        """Update email data (admin function)."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                # Build dynamic UPDATE query
+                set_clauses = []
+                values = []
+                
+                allowed_fields = ['subject', 'sender', 'recipient', 'folder', 'body', 'content_type']
+                for field, value in update_data.items():
+                    if field in allowed_fields:
+                        set_clauses.append(f"{field} = %s")
+                        values.append(value)
+                
+                if not set_clauses:
+                    return False
+                
+                values.append(email_id)
+                query = f"UPDATE emails SET {', '.join(set_clauses)} WHERE id = %s"
+                
+                cursor.execute(query, values)
+                self.connection.commit()
+                return True
+        except Exception as e:
+            print(f"Error updating email: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return False
+
+    def delete_email(self, email_id: int) -> bool:
+        """Delete email by ID (admin function)."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                # Delete related embeddings first
+                cursor.execute("DELETE FROM email_embeddings WHERE email_id = %s", (email_id,))
+                
+                # Delete the email
+                cursor.execute("DELETE FROM emails WHERE id = %s", (email_id,))
+                
+                self.connection.commit()
+                return True
+        except Exception as e:
+            print(f"Error deleting email: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return False
+
+    def get_all_pdf_documents(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Get all PDF documents from the database (admin function)."""
+        if not self.connection:
+            return []
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT * FROM pdf_documents 
+                    ORDER BY created_at DESC 
+                    LIMIT %s
+                """, (limit,))
+                return cursor.fetchall()
+        except Exception as e:
+            print(f"Error getting all PDF documents: {e}")
+            return []
+
+    def get_pdf_document_by_id(self, pdf_id: int) -> Optional[Dict[str, Any]]:
+        """Get PDF document by ID (admin function)."""
+        if not self.connection:
+            return None
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("SELECT * FROM pdf_documents WHERE id = %s", (pdf_id,))
+                return cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting PDF document by ID: {e}")
+            return None
+
+    def update_pdf_document(self, pdf_id: int, update_data: Dict[str, Any]) -> bool:
+        """Update PDF document data (admin function)."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                # Build dynamic UPDATE query
+                set_clauses = []
+                values = []
+                
+                allowed_fields = ['file_name', 'folder_name', 'title', 'author', 'subject', 'content']
+                for field, value in update_data.items():
+                    if field in allowed_fields:
+                        set_clauses.append(f"{field} = %s")
+                        values.append(value)
+                
+                if not set_clauses:
+                    return False
+                
+                values.append(pdf_id)
+                query = f"UPDATE pdf_documents SET {', '.join(set_clauses)} WHERE id = %s"
+                
+                cursor.execute(query, values)
+                self.connection.commit()
+                return True
+        except Exception as e:
+            print(f"Error updating PDF document: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return False
+
+    def delete_pdf_document(self, pdf_id: int) -> bool:
+        """Delete PDF document by ID (admin function)."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                # Delete related embeddings first
+                cursor.execute("DELETE FROM pdf_embeddings WHERE pdf_id = %s", (pdf_id,))
+                
+                # Delete the PDF document
+                cursor.execute("DELETE FROM pdf_documents WHERE id = %s", (pdf_id,))
+                
+                self.connection.commit()
+                return True
+        except Exception as e:
+            print(f"Error deleting PDF document: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return False
+
+    def get_all_projects(self) -> List[Dict[str, Any]]:
+        """Get all projects (placeholder for future project management)."""
+        # This is a placeholder for future project management functionality
+        return []
+
+    def get_project_by_id(self, project_id: int) -> Optional[Dict[str, Any]]:
+        """Get project by ID (placeholder for future project management)."""
+        # This is a placeholder for future project management functionality
+        return None
+
+    def update_project(self, project_id: int, update_data: Dict[str, Any]) -> bool:
+        """Update project data (placeholder for future project management)."""
+        # This is a placeholder for future project management functionality
+        return False
+
+    def delete_project(self, project_id: int) -> bool:
+        """Delete project by ID (placeholder for future project management)."""
+        # This is a placeholder for future project management functionality
+        return False
+
+    def recompute_all_embeddings(self) -> bool:
+        """Recompute all embeddings in the database (admin function)."""
+        if not self.connection:
+            return False
+        
+        try:
+            # This would trigger a full recomputation of all embeddings
+            # Implementation depends on your embedding recomputation logic
+            print("Starting full embedding recomputation...")
+            # TODO: Implement full recomputation logic
+            return True
+        except Exception as e:
+            print(f"Error recomputing embeddings: {e}")
+            return False
+
+    def cleanup_orphaned_records(self) -> bool:
+        """Clean up orphaned records (admin function)."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                # Clean up orphaned email embeddings
+                cursor.execute("""
+                    DELETE FROM email_embeddings 
+                    WHERE email_id NOT IN (SELECT id FROM emails)
+                """)
+                orphaned_emails = cursor.rowcount
+                
+                # Clean up orphaned PDF embeddings
+                cursor.execute("""
+                    DELETE FROM pdf_embeddings 
+                    WHERE pdf_id NOT IN (SELECT id FROM pdf_documents)
+                """)
+                orphaned_pdfs = cursor.rowcount
+                
+                self.connection.commit()
+                print(f"Cleaned up {orphaned_emails} orphaned email embeddings and {orphaned_pdfs} orphaned PDF embeddings")
+                return True
+        except Exception as e:
+            print(f"Error cleaning up orphaned records: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return False
+
+    def optimize_tables(self) -> bool:
+        """Optimize database tables (admin function)."""
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                # Analyze tables for better query planning
+                cursor.execute("ANALYZE emails")
+                cursor.execute("ANALYZE pdf_documents")
+                cursor.execute("ANALYZE email_embeddings")
+                cursor.execute("ANALYZE pdf_embeddings")
+                
+                # Vacuum tables to reclaim storage and update statistics
+                cursor.execute("VACUUM ANALYZE emails")
+                cursor.execute("VACUUM ANALYZE pdf_documents")
+                cursor.execute("VACUUM ANALYZE email_embeddings")
+                cursor.execute("VACUUM ANALYZE pdf_embeddings")
+                
+                self.connection.commit()
+                print("Database tables optimized successfully")
+                return True
+        except Exception as e:
+            print(f"Error optimizing tables: {e}")
+            if self.connection:
+                self.connection.rollback()
+            return False
+
+    # GitHub Issues Search Methods
+    
+    def search_github_issues(self, query: str, query_embedding: List[float],
+                            limit: int = 10, repository: Optional[str] = None,
+                            state: Optional[str] = None, author: Optional[str] = None,
+                            labels: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        Search GitHub issues using semantic similarity.
+        
+        Args:
+            query: Search query text
+            query_embedding: Query embedding vector
+            limit: Maximum number of results
+            repository: Optional repository filter
+            state: Optional state filter
+            author: Optional author filter
+            labels: Optional list of label filters
+            
+        Returns:
+            List of matching issues with similarity scores
+        """
+        if not self.connection:
+            return []
+        
+        try:
+            # Check if we have any GitHub issues with embeddings
+            with self.connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM github_issues gi
+                    JOIN github_issue_embeddings gie ON gi.issue_id = gie.issue_id
+                    WHERE gie.embedding_vector IS NOT NULL
+                """)
+                result = cursor.fetchone()
+                if result is None or result[0] == 0:
+                    print("🔍 No GitHub issues with embeddings found")
+                    return []
+                
+                total_count = result[0]
+                print(f"🔍 Found {total_count} GitHub issues with embeddings")
+            
+            # Build the search query with filters
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                # Build WHERE clause with filters
+                where_conditions = ["gie.embedding_vector IS NOT NULL"]
+                params = []
+                
+                if repository:
+                    where_conditions.append("gi.repository = %s")
+                    params.append(repository)
+                
+                if state and state != 'all':
+                    where_conditions.append("gi.state = %s")
+                    params.append(state)
+                
+                if author:
+                    where_conditions.append("gi.author = %s")
+                    params.append(author)
+                
+                if labels:
+                    label_conditions = []
+                    for label in labels:
+                        label_conditions.append("gi.labels @> %s")
+                        params.append([label])
+                    where_conditions.append(f"({' OR '.join(label_conditions)})")
+                
+                where_clause = " AND ".join(where_conditions)
+                
+                # Add embedding vector and limit to params
+                embedding_array = np.array(query_embedding, dtype=np.float32)
+                embedding_list = embedding_array.tolist()
+                params.extend([embedding_list, embedding_list, limit])
+                
+                cursor.execute(f"""
+                    SELECT gi.issue_id, gi.repository, gi.title, gi.body, gi.state,
+                           gi.labels, gi.assignees, gi.author, gi.created_at, gi.updated_at,
+                           gi.closed_at, gi.comments_count, gi.html_url, gi.issue_number,
+                           gi.milestone, gi.reactions, gi.created_at_db,
+                           gie.embedding_model,
+                           1 - (gie.embedding_vector <=> %s::vector) as similarity_score
+                    FROM github_issues gi
+                    JOIN github_issue_embeddings gie ON gi.issue_id = gie.issue_id
+                    WHERE {where_clause}
+                    ORDER BY 1 - (gie.embedding_vector <=> %s::vector) DESC
+                    LIMIT %s
+                """, params)
+                
+                results = cursor.fetchall()
+                print(f"🔍 pgvector search for GitHub issues returned {len(results)} results")
+                return results
+                
+        except Exception as e:
+            print(f"Error in GitHub issues semantic search: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    def search_github_issues_sql(self, query: str, limit: int = 10,
+                                repository: Optional[str] = None,
+                                state: Optional[str] = None,
+                                author: Optional[str] = None,
+                                labels: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        Search GitHub issues using SQL LIKE queries.
+        
+        Args:
+            query: Search query text
+            limit: Maximum number of results
+            repository: Optional repository filter
+            state: Optional state filter
+            author: Optional author filter
+            labels: Optional list of label filters
+            
+        Returns:
+            List of matching issues
+        """
+        if not self.connection:
+            return []
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                # Build WHERE clause with filters
+                where_conditions = []
+                params = []
+                
+                # Text search conditions
+                search_conditions = []
+                for field in ['title', 'body']:
+                    search_conditions.append(f"{field} ILIKE %s")
+                    params.append(f"%{query}%")
+                
+                if search_conditions:
+                    where_conditions.append(f"({' OR '.join(search_conditions)})")
+                
+                # Repository filter
+                if repository:
+                    where_conditions.append("repository = %s")
+                    params.append(repository)
+                
+                # State filter
+                if state and state != 'all':
+                    where_conditions.append("state = %s")
+                    params.append(state)
+                
+                # Author filter
+                if author:
+                    where_conditions.append("author = %s")
+                    params.append(author)
+                
+                # Labels filter
+                if labels:
+                    label_conditions = []
+                    for label in labels:
+                        label_conditions.append("labels @> %s")
+                        params.append([label])
+                    where_conditions.append(f"({' OR '.join(label_conditions)})")
+                
+                # Build final query
+                where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+                params.append(limit)
+                
+                cursor.execute(f"""
+                    SELECT issue_id, repository, title, body, state, labels, assignees,
+                           author, created_at, updated_at, closed_at, comments_count,
+                           html_url, issue_number, milestone, reactions, created_at_db
+                    FROM github_issues
+                    WHERE {where_clause}
+                    ORDER BY updated_at DESC
+                    LIMIT %s
+                """, params)
+                
+                return cursor.fetchall()
+                
+        except Exception as e:
+            print(f"Error in GitHub issues SQL search: {e}")
+            return []
+    
+    def store_github_issue_embedding(self, issue_id: int, embedding_model: str,
+                                   embedding_vector: List[float]) -> bool:
+        """
+        Store embedding for a GitHub issue.
+        
+        Args:
+            issue_id: GitHub issue ID
+            embedding_model: Name of the embedding model
+            embedding_vector: Embedding vector
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.connection:
+            return False
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO github_issue_embeddings (issue_id, embedding_model, embedding_vector)
+                    VALUES (%s, %s, %s::vector)
+                    ON CONFLICT (issue_id, embedding_model) DO UPDATE SET
+                        embedding_vector = EXCLUDED.embedding_vector,
+                        created_at = CURRENT_TIMESTAMP
+                """, (issue_id, embedding_model, embedding_vector))
+                
+                self.connection.commit()
+                return True
+                
+        except Exception as e:
+            print(f"Error storing GitHub issue embedding: {e}")
+            if self.connection:
+                self.connection.rollback()
             return False

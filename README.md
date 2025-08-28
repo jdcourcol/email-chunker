@@ -16,6 +16,8 @@ A comprehensive Python library for reading, parsing, and analyzing emails from M
 - **Standalone Search**: Search database without Maildir access
 - **Configurable Depth**: Adjustable semantic search coverage
 - **Smart Prioritization**: Results ordered by search method relevance
+- **PDF Document Search**: Index and search through PDF documents with semantic understanding
+- **Multi-Format Support**: Handle emails and PDFs in a unified search interface
 - **No External Dependencies**: Core functionality uses only Python standard library
 
 ## 📁 **Project Structure**
@@ -82,6 +84,25 @@ uv run search_emails.py --query "project deadline" --type semantic --semantic-de
 
 # SQL search with case sensitivity
 uv run search_emails.py --query "URGENT" --type sql --case-sensitive --show-sql
+
+# PDF document search
+uv run search_emails.py --query "contract terms" --type pdf --limit 5
+```
+
+### **PDF Document Indexing**
+```bash
+# Index PDF documents from a directory
+uv run index_pdfs.py /path/to/documents --folder-name "contracts"
+
+# Check what would be indexed (dry run)
+uv run index_pdfs.py /path/to/documents --dry-run
+
+# Index with custom database settings
+uv run index_pdfs.py /path/to/documents \
+    --db-host localhost \
+    --db-name docs_db \
+    --db-user username \
+    --db-password password
 ```
 
 ## 📚 **Installation**
@@ -210,6 +231,29 @@ results = searcher.search_emails_hybrid(
 semantic_results = results['semantic_results']
 sql_results = results['sql_results']
 combined_results = results['combined_results']
+
+### **PDF Search Usage**
+```python
+from database_searcher import DatabaseSearcher
+from reranker import create_reranker
+
+# Initialize searcher with reranker
+reranker = create_reranker()
+searcher = DatabaseSearcher(db_manager, embedding_model, reranker)
+
+# Search PDF documents
+pdf_results = searcher.search_pdf_documents(
+    query="contract terms",
+    limit=10
+)
+
+# Access PDF metadata
+for doc in pdf_results:
+    print(f"File: {doc['file_name']}")
+    print(f"Title: {doc['title']}")
+    print(f"Author: {doc['author']}")
+    print(f"Pages: {doc['page_count']}")
+    print(f"Similarity: {doc['similarity_score']:.3f}")
 ```
 
 ## 🔍 **Advanced Search Capabilities**
@@ -230,6 +274,7 @@ uv run search_emails.py --query "your search term" --type sql --limit 5
 - **`--type semantic`**: AI-powered semantic search using pgvector
 - **`--type sql`**: Traditional text-based search using SQL LIKE/ILIKE
 - **`--type both`**: Hybrid search combining both methods
+- **`--type pdf`**: Search through indexed PDF documents using semantic similarity (no folder filtering)
 
 ### **Semantic Search Features**
 - **pgvector Integration**: Database-level vector similarity search
@@ -240,9 +285,9 @@ uv run search_emails.py --query "your search term" --type sql --limit 5
 ### **Search Options**
 ```bash
 --query "search term"           # Search query
---type semantic|sql|both        # Search type
+--type semantic|sql|both|pdf   # Search type
 --limit N                       # Maximum results
---folder FOLDER                 # Limit to specific folder
+--folder FOLDER                 # Limit to specific folder (emails only)
 --fields subject body sender    # SQL search fields
 --case-sensitive                # Case-sensitive SQL search
 --show-sql                      # Display SQL queries
@@ -334,6 +379,9 @@ uv run search_emails.py \
     --semantic-depth 200 \
     --show-sql \
     --case-sensitive
+
+# PDF document search
+uv run search_emails.py --query "contract terms" --type pdf --limit 10
 ```
 
 ### **Embedding Management**
@@ -346,6 +394,18 @@ uv run recompute_embeddings.py --show-stats
 
 # Dry run (see what would be done)
 uv run recompute_embeddings.py --dry-run
+```
+
+### **PDF Document Management**
+```bash
+# Index PDF documents
+uv run index_pdfs.py /path/to/documents --folder-name "contracts"
+
+# Check what would be indexed
+uv run index_pdfs.py /path/to/documents --dry-run
+
+# Index with progress updates
+uv run index_pdfs.py /path/to/documents --verbose
 ```
 
 ### **Configuration Management**

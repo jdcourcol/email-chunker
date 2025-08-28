@@ -90,6 +90,16 @@ class Config:
         """Get embedding model name from configuration."""
         return self.config.get('embedding_model', 'intfloat/e5-base')
     
+    def get_github_token(self) -> Optional[str]:
+        """Get GitHub token from configuration or environment."""
+        # Try config file first
+        token = self.config.get('github_token')
+        if token:
+            return token
+        
+        # Try environment variable
+        return os.getenv('GITHUB_TOKEN')
+    
     def has_db_config(self) -> bool:
         """Check if database configuration is complete."""
         db_config = self.get_db_config()

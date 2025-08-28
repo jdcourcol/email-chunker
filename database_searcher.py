@@ -94,14 +94,13 @@ class DatabaseSearcher:
             print(f"Error in semantic search: {e}")
             return []
     
-    def search_pdf_documents(self, query: str, limit: int = 10, folder_name: str = None) -> List[Dict[str, Any]]:
+    def search_pdf_documents(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Search PDF documents using semantic similarity.
         
         Args:
             query: Search query text
             limit: Maximum number of results
-            folder_name: Optional folder to limit search to
             
         Returns:
             List of matching PDF documents with similarity scores
@@ -118,8 +117,7 @@ class DatabaseSearcher:
             results = self.db_manager.search_pdf_documents(
                 query=query,
                 query_embedding=query_embedding,
-                limit=limit,
-                folder_name=folder_name
+                limit=limit
             )
             
             # Add search_type to each result

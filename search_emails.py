@@ -109,8 +109,7 @@ def main():
             # PDF document search
             results = searcher.search_pdf_documents(
                 query=args.query,
-                limit=args.limit,
-                folder_name=args.folder
+                limit=args.limit
             )
             
             if not results:
